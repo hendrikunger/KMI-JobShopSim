@@ -9,7 +9,7 @@ apt-get install python3-dev
 pip install -r requirements_factorySim.txt
 ```
 
-Navigate to the factorySim/env directory
+Navigate to the jobShopSim/env directory
 ```sh
 cd env
 ```
