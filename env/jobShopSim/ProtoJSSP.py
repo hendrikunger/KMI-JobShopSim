@@ -11,6 +11,10 @@ EnvID: TypeAlias = int
 JobID: TypeAlias = int
 CustomID: TypeAlias = str | int
 
+# forward reference, referenced before assignment
+#Job: TypeAlias = 'Job'
+#Dispatcher: TypeAlias = 'Dispatcher'
+
 # logging
 LOGGING_LEVEL = 'DEBUG'
 Logger = logging.getLogger('base')
@@ -198,6 +202,8 @@ class Machine(simpy.resources.resource.Resource):
 
 
 class Dispatcher(object):
+    Job: TypeAlias = 'Job'
+    Dispatcher: TypeAlias = 'Dispatcher'
     
     def __init__(
         self,
@@ -308,6 +314,8 @@ class Operation(object):
 
  
 class Job(object):
+    Job: TypeAlias = 'Job'
+    Dispatcher: TypeAlias = 'Dispatcher'
     
     def __init__(
         self,
