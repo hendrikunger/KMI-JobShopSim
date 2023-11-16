@@ -1,19 +1,7 @@
 # KMI-JobShopSim
-Gym Simulation Environment for Job Shop Problems using ManPy
+**Gym Simulation Environment for Job Shop Problems using Salabim**
 
-## Developing instructions
+*currently in progress*
+Goal: provide a flexibel interface to design simulation environments for manufacturing systems which can be easily integrated in reinforcement learning workflows and provides a convenient way to conduct differing experiments
 
-```sh
-apt-get update
-apt-get install python3-dev
-pip install -r requirements_factorySim.txt
-```
-
-Navigate to the jobShopSim/env directory
-```sh
-cd env
-```
-Build a local package of factorySim using
-```sh
-python -m pip install -e .
-```
+Additional information is provided at later project-stages.
