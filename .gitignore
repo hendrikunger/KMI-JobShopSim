@@ -1,3 +1,11 @@
+# data sets or data sources which could contain sensitive information
+*.xls
+*.xlsx
+*.xlsm
+*.csv
+datasets/
+dataset/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
