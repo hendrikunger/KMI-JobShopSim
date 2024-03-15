@@ -1,13 +1,17 @@
+from __future__ import annotations
 import numpy as np
 import numpy.typing as npt
-from .sim_env import SimulationEnvironment, System, Job
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .sim_env import SimulationEnvironment, System, Job
 
 
 class Agent:
     
     def __init__(
         self,
-        assoc_system: System,
+        assoc_system: 'System',
         agent_type: str,
     ) -> None:
         # basic information
@@ -20,7 +24,7 @@ class Agent:
         
     
     @property
-    def assoc_system(self) -> System:
+    def assoc_system(self) -> 'System':
         return self._assoc_system
     
     @property
@@ -28,7 +32,7 @@ class Agent:
         return self._agent_type
     
     @property
-    def env(self) -> SimulationEnvironment:
+    def env(self) -> 'SimulationEnvironment':
         return self._env
     
     def build_feat_vec(self):
@@ -88,7 +92,7 @@ class AllocationAgent(Agent):
             
     def request_decision(
         self,
-        disposable_job: Job,
+        disposable_job: 'Job',
     ) -> None:
         # for each request, decision not done yet
         # indicator for internal loop
@@ -122,7 +126,7 @@ class AllocationAgent(Agent):
     # REWORK
     def _build_feat_vec(
         self,
-        disposable_job: Job,
+        disposable_job: 'Job',
     ) -> 'FeatureVector':
         
         # resources

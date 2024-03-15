@@ -19,7 +19,10 @@ import pandas as pd
 from pandas import DataFrame, Series
 import plotly.express as px
 from plotly.graph_objs._figure import Figure
-from .utils import flatten, DTParser
+from .utils import (flatten, DTParser, 
+                    TIMEZONE_UTC, TIMEZONE_CEST, 
+                    DEFAULT_DATETIME, validate_dt_UTC,
+                    dt_to_timezone, adjust_db_dates_local_tz)
 from .agents import AllocationAgent, SequencingAgent
 
 # set Salabim to yield mode (using yield is mandatory)
@@ -56,30 +59,30 @@ LOGGING_LEVEL_MONITORS = 'ERROR'
 LOGGING_LEVEL_AGENTS = 'DEBUG'
 
 
-logger = logging.getLogger('base')
+logger = logging.getLogger('sim_env.base')
 logger.setLevel(LOGGING_LEVEL)
-logger_env = logging.getLogger('env')
+logger_env = logging.getLogger('sim_env.env')
 logger_env.setLevel(LOGGING_LEVEL_ENV)
-logger_dispatcher = logging.getLogger('dispatcher')
+logger_dispatcher = logging.getLogger('sim_env.dispatcher')
 logger_dispatcher.setLevel(LOGGING_LEVEL_DISPATCHER)
-logger_infstrct = logging.getLogger('infstrct')
+logger_infstrct = logging.getLogger('sim_env.infstrct')
 logger_infstrct.setLevel(LOGGING_LEVEL_INFSTRCT)
-logger_sources = logging.getLogger('sources')
+logger_sources = logging.getLogger('sim_env.sources')
 logger_sources.setLevel(LOGGING_LEVEL_SOURCES)
-logger_sinks = logging.getLogger('sinks')
+logger_sinks = logging.getLogger('sim_env.sinks')
 logger_sinks.setLevel(LOGGING_LEVEL_SINKS)
-logger_prodStations = logging.getLogger('prodStations')
+logger_prodStations = logging.getLogger('sim_env.prodStations')
 logger_prodStations.setLevel(LOGGING_LEVEL_PRODSTATIONS)
-logger_buffers = logging.getLogger('buffers')
+logger_buffers = logging.getLogger('sim_env.buffers')
 logger_buffers.setLevel(LOGGING_LEVEL_BUFFERS)
-logger_monitors = logging.getLogger('monitors')
+logger_monitors = logging.getLogger('sim_env.monitors')
 logger_monitors.setLevel(LOGGING_LEVEL_MONITORS)
-logger_agents = logging.getLogger('agents')
+logger_agents = logging.getLogger('sim_env.agents')
 logger_agents.setLevel(LOGGING_LEVEL_AGENTS)
 
-logger_jobs = logging.getLogger('jobs')
+logger_jobs = logging.getLogger('sim_env.jobs')
 logger_jobs.setLevel(LOGGING_LEVEL_JOBS)
-logger_operations = logging.getLogger('operations')
+logger_operations = logging.getLogger('sim_env.operations')
 logger_operations.setLevel(LOGGING_LEVEL_OPERATIONS)
 
 
@@ -315,7 +318,7 @@ class SimulationEnvironment(sim.Environment):
         
         logger_env.info(f"Integrity check for Environment {self.name()} successful.")
     
-    def finalise_sim(self) -> None:
+    def finalise(self) -> None:
         """
         Function which should be executed at the end of the simulation.
         Can be used for finalising data collection, other related tasks or further processing pipelines
@@ -893,6 +896,8 @@ class Dispatcher:
             'lead_time',
             'state',
         ])
+        # date adjusted database for finalisation at the end of a simulation run
+        self._job_db_date_adjusted = self._job_db.copy()
         
         # operation data base as simple Pandas DataFrame
         # column data types
@@ -949,6 +954,8 @@ class Dispatcher:
             'lead_time',
             'state',
         ])
+        # date adjusted database for finalisation at the end of a simulation run
+        self._op_db_date_adjusted = self._op_db.copy()
         
         # register in environment and get EnvID
         self._env = env
@@ -1523,11 +1530,27 @@ class Dispatcher:
         return self._job_db
     
     @property
+    def job_db_date_adjusted(self) -> DataFrame:
+        """
+        obtain a current date adjusted overview of registered jobs in 
+        the environment
+        """
+        return self._job_db_date_adjusted
+    
+    @property
     def op_db(self) -> DataFrame:
         """
         obtain a current overview of registered operations in the environment
         """
         return self._op_db
+    
+    @property
+    def op_db_date_adjusted(self) -> DataFrame:
+        """
+        obtain a current date adjusted overview of registered 
+        operations in the environment
+        """
+        return self._op_db_date_adjusted
 
     #@lru_cache(maxsize=200)
     def get_job_obj_by_prop(
@@ -1579,7 +1602,6 @@ class Dispatcher:
     def request_job_allocation(
         self,
         job: Job,
-        agent: bool,
     ) -> InfrastructureObject:
         """
         request an allocation decision for the given job 
@@ -2003,6 +2025,7 @@ class Dispatcher:
         sort_by_proc_station: bool = False,
         sort_ascending: bool = True,
         group_by_exec_system: bool = False,
+        dates_to_local_tz: bool = True,
         save_img: bool = False,
         save_html: bool = False,
         file_name: str = 'gantt_chart',
@@ -2018,6 +2041,9 @@ class Dispatcher:
             between start and end; if there were no interruptions both methods return the same results \
             default: False
         """
+        # TODO: Implement date conversion to local time zone
+        # TODO: use copy of original data table with adapted dates
+        
         # filter operation DB for relevant information
         filter_items: list[str] = [
             'job_name',
@@ -2052,10 +2078,14 @@ class Dispatcher:
             'setup_time': True,
             'order_time': True,
         }
-        
         #hover_template: str = "proc_time: %{proc_time|%d:%H:%M:%S}"
+        if dates_to_local_tz:
+            target_db = self._op_db_date_adjusted
+        else:
+            target_db = self._op_db
         
-        df = self._op_db.filter(items=filter_items)
+        
+        df = target_db.filter(items=filter_items)
         # calculate delta time between start and end
         # Timedelta
         #df['delta'] = df['exit_date'] - df['entry_date']
@@ -2244,6 +2274,8 @@ class Dispatcher:
         the environment's "finalise_sim" method
         """
         self._calc_cycle_time()
+        self._job_db_date_adjusted = adjust_db_dates_local_tz(db=self._job_db)
+        self._op_db_date_adjusted = adjust_db_dates_local_tz(db=self._op_db)
 
 
 # systems
@@ -4049,8 +4081,8 @@ class Source(InfrastructureObject):
             prio = self.job_generator.gen_prio() + count
             #prio = [2,8]
             # assign starting and ending dates
-            start_date_init = Datetime(2023, 11, 20, hour=6)
-            end_date_init = Datetime(2023, 12, 1, hour=10)
+            start_date_init = Datetime(2023, 11, 20, hour=6, tzinfo=TIMEZONE_UTC)
+            end_date_init = Datetime(2023, 12, 1, hour=10, tzinfo=TIMEZONE_UTC)
             #start_date_init = [Datetime(2023, 11, 20, hour=6), Datetime(2023, 11, 21, hour=2)]
             #end_date_init = [Datetime(2023, 12, 1, hour=10), Datetime(2023, 12, 2, hour=2)]
             
@@ -4198,20 +4230,25 @@ class Operation:
         # inter-process time characteristics
         # time of release
         #self.time_release: float = 0.
-        self.time_release: Datetime = Datetime.min
+        self.time_release = DEFAULT_DATETIME
         # time of first operation starting point
-        self.time_actual_starting: Datetime = Datetime.min
+        self.time_actual_starting = DEFAULT_DATETIME
         # starting date deviation
         self.starting_date_deviation: Timedelta | None = None
         # time of last operation ending point
-        self.time_actual_ending: Datetime = Datetime.min
+        self.time_actual_ending = DEFAULT_DATETIME
         # ending date deviation
         self.ending_date_deviation: Timedelta | None = None
         # lead time
         #self.lead_time: float = 0.
-        self.lead_time: Datetime = Datetime.min
+        self.lead_time = DEFAULT_DATETIME
         # starting and end dates
+        # validate time zone information for given datetime objects
+        if planned_starting_date is not None:
+            validate_dt_UTC(planned_starting_date)
         self.time_planned_starting = planned_starting_date
+        if planned_starting_date is not None:
+            validate_dt_UTC(planned_ending_date)
         self.time_planned_ending = planned_ending_date
         # in future setting starting points in advance possible
         self.is_finished: bool = False
@@ -4375,21 +4412,29 @@ class Job(sim.Component):
         self.time_planned_ending: Datetime | None = None
         if isinstance(planned_starting_date, Sequence):
             # operation-wise defined starting dates
+            # datetime validation done in operation class
             op_starting_dates = planned_starting_date
             # job starting date later set by 'get_next_operation' method
-            self.op_starting_dates = True
+            self.op_wise_starting_date = True
         else:
             # only job-wise defined starting date
             op_starting_dates: list[None] = [None] * len(proc_times)
+            # validate time zone information for given datetime object
+            if planned_starting_date is not None:
+                validate_dt_UTC(planned_starting_date)
             self.time_planned_starting = planned_starting_date
         if isinstance(planned_ending_date, Sequence):
-            # operation-wise defined starting dates
+            # operation-wise defined ending dates
+            # datetime validation done in operation class
             op_ending_dates = planned_ending_date
             # job ending date later set by 'get_next_operation' method
             self.op_wise_ending_date = True
         else:
             # only job-wise defined starting date
             op_ending_dates: list[None] = [None] * len(proc_times)
+            # validate time zone information for given datetime object
+            if planned_ending_date is not None:
+                validate_dt_UTC(planned_ending_date)
             self.time_planned_ending = planned_ending_date
         
         ### VALIDITY CHECK ###
@@ -4437,21 +4482,21 @@ class Job(sim.Component):
         # inter-process time characteristics
         # time of release
         #self.time_release: float = 0.
-        self.time_release: Datetime = Datetime.min
+        self.time_release = DEFAULT_DATETIME
         # time of first operation starting point
-        self.time_actual_starting: Datetime = Datetime.min
+        self.time_actual_starting = DEFAULT_DATETIME
         # starting date deviation
         self.starting_date_deviation: Timedelta | None = None
         # time of last operation ending point
-        self.time_actual_ending: Datetime = Datetime.min
+        self.time_actual_ending = DEFAULT_DATETIME
         # ending date deviation
         self.ending_date_deviation: Timedelta | None = None
         # lead time
         #self.lead_time: float = 0.
-        self.lead_time: Datetime = Datetime.min
+        self.lead_time = DEFAULT_DATETIME
         # time of creation
         #self.time_creation: float = 0.
-        self.time_creation: Datetime = Datetime.min
+        self.time_creation = DEFAULT_DATETIME
         
         # current resource location
         self._current_resource: InfrastructureObject | None = None
