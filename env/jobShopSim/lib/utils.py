@@ -180,7 +180,7 @@ def add_timedelta_with_tz(
 
 def validate_dt_UTC(
     dt: Datetime,
-) -> bool:
+) -> None:
     """_summary_
 
     Parameters
@@ -188,11 +188,6 @@ def validate_dt_UTC(
     dt : Datetime
         datetime object to be checked for available UTC time zone
         information
-
-    Returns
-    -------
-    bool
-        True if UTC information is available
 
     Raises
     ------
@@ -203,8 +198,6 @@ def validate_dt_UTC(
     if dt.tzinfo != TIMEZONE_UTC:
         raise ValueError(f"Datetime object {dt} does not contain "
                          "necessary UTC time zone information")
-    else:
-        return True
 
 def dt_to_timezone(
     dt: Datetime,
@@ -237,6 +230,12 @@ def dt_to_timezone(
     dt_local_tz = dt.astimezone(tz=target_tz)
     
     return dt_local_tz
+
+def cut_dt_microseconds(
+    dt: Datetime,
+) -> Datetime:
+    return dt.replace(microsecond=0)
+
 
 # data wrangling
 

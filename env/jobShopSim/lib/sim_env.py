@@ -22,7 +22,8 @@ from plotly.graph_objs._figure import Figure
 from .utils import (flatten, DTParser, 
                     TIMEZONE_UTC, TIMEZONE_CEST, 
                     DEFAULT_DATETIME, validate_dt_UTC,
-                    dt_to_timezone, adjust_db_dates_local_tz)
+                    dt_to_timezone, adjust_db_dates_local_tz,
+                    current_time_tz, cut_dt_microseconds)
 from .agents import AllocationAgent, SequencingAgent
 
 # set Salabim to yield mode (using yield is mandatory)
@@ -123,12 +124,14 @@ class SimulationEnvironment(sim.Environment):
         self.time_unit = time_unit
         # if starting datetime not provided use current time
         if starting_datetime is None:
-            starting_datetime = datetime.datetime.now()
-        # remove microseconds, such accuracy not needed
-        starting_datetime = starting_datetime.replace(microsecond=0)
+            starting_datetime = current_time_tz(cut_microseconds=True)
+        else:
+            validate_dt_UTC(starting_datetime)
+            # remove microseconds, such accuracy not needed
+            starting_datetime = cut_dt_microseconds(dt=starting_datetime)
         self.starting_datetime = starting_datetime
         
-        super().__init__(time_unit=self.time_unit, datetime0=self.starting_datetime, **kwargs)
+        super().__init__(trace=False, time_unit=self.time_unit, datetime0=self.starting_datetime, **kwargs)
         
         # [RESOURCE] infrastructure manager
         self._infstruct_mgr_registered: bool = False
@@ -138,9 +141,10 @@ class SimulationEnvironment(sim.Environment):
         self._dispatcher_registered: bool = False
         self._dispatcher: Dispatcher | None = None
         
+        # !! remove later, signals now in agent class
         # [DECISION FLAGS]
-        self._signal_allocation: bool = False
-        self._signal_sequencing: bool = False
+        #self._signal_allocation: bool = False
+        #self._signal_sequencing: bool = False
     
     def t_as_dt(self) -> Datetime:
         """return current simulation time as Datetime object
@@ -249,12 +253,12 @@ class SimulationEnvironment(sim.Environment):
         
         logger_env.debug(f"Dispatching type >>{signal_type}<<: Flag for Env {self.name()} was set to >>{signal}<<.")
     
+    # !! REMOVE, added to agents
     def build_alloc_feat_vec(
         self,
         exec_system: System | None = None,
     ) -> 'FeatureVector':
         """
-        REWORK
         method to generate allocation feature vectors for a given execution system
         currently neither conceptualised nor implemented
         functionality needed:
@@ -1598,10 +1602,37 @@ class Dispatcher:
     
     ### ROUTING LOGIC ###
     
+    def check_alloc_dispatch(
+        self,
+        job: Job,
+    ) -> bool:
+        # get next operation of job
+        next_op = self.get_next_operation(job=job)
+        if self._curr_alloc_rule == 'AGENT':
+            if next_op is not None:
+                target_exec_system = next_op.target_exec_system
+                # check agent availability
+                is_agent = target_exec_system.check_alloc_agent()
+            else:
+                is_agent = False
+        else:
+            # if allocation rule is not >>AGENT<< flag is always False
+            is_agent = False
+        
+        # only call agent if OP is available
+        if is_agent:
+            # agent available, get necessary information for decision
+            agent = target_exec_system.alloc_agent
+            # request decision from agent, sets internal flag
+            agent.request_decision(disposable_job=job)
+            logger_dispatcher.debug(f"[DISPATCHER: {self}] Alloc Agent found. Decision request made.")
+        
+        return is_agent
     
     def request_job_allocation(
         self,
         job: Job,
+        is_agent: bool,
     ) -> InfrastructureObject:
         """
         request an allocation decision for the given job 
@@ -1621,9 +1652,9 @@ class Dispatcher:
         ## preparing feature vectors as input --> trigger agent decision -->
         ## map decision to processing station
         
-        logger_dispatcher.info(f"[DISPATCHER: {self}] REQUEST TO DISPATCHER FOR ALLOCATION")
+        #logger_dispatcher.info(f"[DISPATCHER: {self}] REQUEST TO DISPATCHER FOR ALLOCATION")
         # set environment signal for ALLOCATION
-        self._env.set_dispatching_signal(sequencing=False, reset=False)
+        #self._env.set_dispatching_signal(sequencing=False, reset=False)
         #self._env.main().activate()
         #yield job.hold(0)
         
@@ -1644,57 +1675,48 @@ class Dispatcher:
         ### --> (2) as implemented solution
         
         
-        # get the next operation of the job
-        #next_op = job.get_next_operation()
-        next_op = self.get_next_operation(job=job)
-        if next_op is not None:
+        # get the target operation of the job
+        #next_op = self.get_next_operation(job=job)
+        op = job.current_op
+        if op is not None:
             # get target execution system ((sub)system type) (defined by the global variable EXEC_SYSTEM_TYPE)
-            target_exec_system = next_op.target_exec_system
+            target_exec_system = op.target_exec_system
             # get target station group
-            target_station_group = next_op.target_station_group
+            target_station_group = op.target_station_group
            
             ##### PROCEDURE AGENT DECISION
             # build feature vector of the target station collection + given job instance
             # go into target station choice...
             ### ADD OBTAINED TARGET STATION GROUP
-            logger_dispatcher.debug(f"[DISPATCHER: {self}] Next operation {next_op}")
+            logger_dispatcher.debug(f"[DISPATCHER: {self}] Next operation {op}")
+            
             target_station = self._choose_target_station_from_exec_system(
                                             exec_system=target_exec_system,
-                                            job=job,
+                                            op=op,
+                                            is_agent=is_agent,
                                             target_station_group=target_station_group)
-            # check feasibility of the target station
-            feasible = self._env.check_feasible_agent_alloc(
-                                            target_station=target_station,
-                                            op=next_op)
-            if not feasible:
-                raise RuntimeError((f"The choosen {target_station} is not feasible "
-                    f"for {next_op}"))
-            
-            # ADDITIONAL: check if more than one station possible
-            # check if agent available --> CHOICE METHOD
-            ## agent registration in corresponding system (prod_area: allocation, resource: sequencing)
-            # ...
             
             # with allocation request operation is released
-            self.release_operation(op=next_op, target_station=target_station)
+            self.release_operation(op=op, target_station=target_station)
         # all operations done, look for sinks
         else:
             infstruct_mgr = self.env.infstruct_mgr
             sinks = infstruct_mgr.sinks
-            # [PERHAPS CHANGE IN FUTURE]
+            # ?? [PERHAPS CHANGE IN FUTURE]
             # use first sink of the registered ones
             target_station = sinks[0]
         
-        logger_dispatcher.debug(f"[DISPATCHER: {self}] Next operation is {next_op} with machine group (machine) {target_station}")
+        logger_dispatcher.debug(f"[DISPATCHER: {self}] Next operation is {op} with machine group (machine) {target_station}")
         # reset environment signal for ALLOCATION
-        self._env.set_dispatching_signal(sequencing=False, reset=True)
+        #self._env.set_dispatching_signal(sequencing=False, reset=True)
         
         return target_station
     
     def _choose_target_station_from_exec_system(
         self,
         exec_system: System,
-        job: Job,
+        op: Operation,
+        is_agent: bool,
         target_station_group: StationGroup | None = None,
     ) -> ProcessingStation:
         """REWORK Choosing a target station from a given collection of processing stations
@@ -1720,7 +1742,8 @@ class Dispatcher:
         
         # obtain the lowest level systems (only ProcessingStations) of 
         # that area or station group
-        if target_station_group is not None and self._curr_alloc_rule != 'AGENT':
+        #if target_station_group is not None and self._curr_alloc_rule != 'AGENT':
+        if target_station_group is not None and not is_agent:
             # preselection of station group only with allocation rules other than >>AGENT<<
             stations = target_station_group.lowest_level_subsystems(only_processing_stations=True)
         else:
@@ -1736,7 +1759,8 @@ class Dispatcher:
         # available stations
         ## AGENT can choose from all stations, not only available ones
         ## availability of processing stations is checked in the feasibility method
-        if self._curr_alloc_rule != 'AGENT':
+        #if self._curr_alloc_rule != 'AGENT':
+        if not is_agent:
             # choose only from available processing stations
             candidates: list[ProcessingStation] = [ps for ps in stations if ps.stat_monitor.is_available]
             # if there are no available ones: use all stations
@@ -1746,9 +1770,16 @@ class Dispatcher:
                 avail_stations = stations
         else:
             # check agent availability
-            exec_system.check_alloc_agent()
+            #exec_system.check_alloc_agent()
             # get agent from execution system
             agent = exec_system.alloc_agent
+            # available stations are the associated ones
+            avail_stations = agent.assoc_infstrct_objs
+            # !! Feature vector already built in checking method
+            # !! request is being made and feature vector obtained
+            
+            
+            
             ### CALL BUILDING FEATURE VECTOR ###
             # procedure:
             # (0) Gym reset (startup phase)
@@ -1767,7 +1798,7 @@ class Dispatcher:
             
             # indicate that request is being done
             # must be blocking
-            agent.request_decision(disposable_job=job)
+            #agent.request_decision(disposable_job=job)
             #agent.activate()
             
             # main problem:
@@ -1777,6 +1808,7 @@ class Dispatcher:
             # only possible by using salabim's modelling techniques
             # problem: techniques can be used solely by salabim components
             
+            # !! Important: new logic
             # possible solution: use modelling flow before dispatcher call, placeholder: self.hold(0)
             # tested execution flow with hold(0): creates events at the same point in time
             # --> idea:
@@ -1792,8 +1824,8 @@ class Dispatcher:
             # inside method: set flags, build feature vector
             # agent obtains associated stations by the connected ProductionArea and its subsystems
             #agent.build_feat_vec(disposable_job=job)
-            print(f'{agent.feat_vec=}')
             #time.sleep(5)
+            """
             while not agent.RL_decision_done:
                 # wait for agent decision
                 # when decision is done in Gym Env: communicate decision by
@@ -1810,6 +1842,7 @@ class Dispatcher:
                 agent.set_decision(action=stat_idx)
                 
                 #pass
+            """
             
             
             # stop simulation at this point
@@ -1820,11 +1853,11 @@ class Dispatcher:
             # TEST ONLY: make tuple out of all stations
             # all stations are available
             # stations separately not necessary because agent already has information about associated target resources
-            avail_stations = tuple(stations)
+            #avail_stations = tuple(stations)
             # LATER: generation in dedicated method to build feature vector
         
-        logger_dispatcher.debug(f"[DISPATCHER: {self}] Available stations at {self.env.now()} are {avail_stations}")
-        
+        logger_dispatcher.debug((f"[DISPATCHER: {self}] Available stations at {self.env.now()} ",
+                                     f"are {avail_stations}"))
         # apply different strategies to select a station out of the station group
         match self._curr_alloc_rule:
             case 'RANDOM':
@@ -1843,90 +1876,36 @@ class Dispatcher:
                 # WIP as number of associated jobs, choose station with lowest WIP
                 target_station: ProcessingStation = min(avail_stations, key=attrgetter('stat_monitor.WIP_load_num_jobs'))
                 logger_dispatcher.debug(f"[DISPATCHER: {self}] WIP LOAD NUM JOBS of {target_station=} is {target_station.stat_monitor.WIP_load_time:.2f}")
-            case 'AGENT':
-                # request decision with previously built feature vector
-                # get index value for target station out of tuple
-                # [ONLY TEST] simulate agent decision by user input
-                # only if more than one station
-                """
-                if len(avail_stations) > 1:
-                    pprint(f"The available stations are:\n {avail_stations}")
-                    #stat_idx = input("Please enter a target station index:")
-                    #stat_idx = int(stat_idx)
-                    stat_idx = agent.action
-                    target_station = avail_stations[stat_idx]
-                else:
-                    target_station = avail_stations[0]
-                """
+            
+        """case 'AGENT':
+            # request decision with previously built feature vector
+            # get index value for target station out of tuple
+            # [ONLY TEST] simulate agent decision by user input
+            # only if more than one station
+            
+            if len(avail_stations) > 1:
+                pprint(f"The available stations are:\n {avail_stations}")
+                #stat_idx = input("Please enter a target station index:")
+                #stat_idx = int(stat_idx)
                 stat_idx = agent.action
                 target_station = avail_stations[stat_idx]
-                
-        # feasibility check in the request job allocation method after the target station is returned
-        
-        # [KPIs] reset all associated processing stations of that group to their original state
-        infstruct_mgr.res_objs_temp_state(res_objs=stations, reset_temp=True)
-        
-        return target_station
-    
-    def _choose_target_station_from_collection(
-        self,
-        stations: Iterable[ProcessingStation],
-    ) -> ProcessingStation:
-        """Choosing a target station from a given collection of processing stations
-
-        Parameters
-        ----------
-        stations : Iterable[ProcessingStation]
-            collection of processing stations from which the target station should be obtained
-
-        Returns
-        -------
-        ProcessingStation
-            station object on which the job should be placed
+            else:
+                target_station = avail_stations[0]
+            
+            stat_idx = agent.action
+            target_station = avail_stations[stat_idx]
         """
-        
-        # infrastructure manager
-        infstruct_mgr = self.env.infstruct_mgr
-        
-        # [KPIs] calculate necessary information for decision making
-        # put all associated processing stations of that group in 'TEMP' state
-        infstruct_mgr.res_objs_temp_state(res_objs=stations, reset_temp=False)
-        
-        # choose only from available processing stations
-        candidates = [ps for ps in stations if ps.stat_monitor.is_available]
-        # check if there are available processing stations
-        # if not: use all stations
-        if candidates:
-            avail_stations = candidates
-        else:
-            avail_stations = stations
-        
-        logger_dispatcher.debug(f"[DISPATCHER: {self}] Available stations at {self.env.now()} are {avail_stations}")
-        
-        # apply different strategies to select a station out of the station group
-        match self._curr_alloc_rule:
-            case 'RANDOM':
-                # [RANDOM CHOICE]
-                target_station: ProcessingStation = random.choice(avail_stations)
-            case 'UTILISATION':
-                # [UTILISATION]
-                # choose the station with the lowest utilisation to time
-                temp = sorted(avail_stations, key=attrgetter('stat_monitor.utilisation'), reverse=True)
-                target_station: ProcessingStation = temp.pop()
-                logger_dispatcher.debug(f"[DISPATCHER: {self}] Utilisation of {target_station=} is {target_station.stat_monitor.utilisation:.4f}")
-            case 'WIP_LOAD_TIME':
-                # WIP as load/processing time, choose station with lowest WIP
-                temp = sorted(avail_stations, key=attrgetter('stat_monitor.WIP_load_time'), reverse=True)
-                target_station: ProcessingStation = temp.pop()
-                logger_dispatcher.debug(f"[DISPATCHER: {self}] WIP LOAD TIME of {target_station=} is {target_station.stat_monitor.WIP_load_time:.2f}")
-            case 'WIP_LOAD_JOBS':
-                # WIP as number of associated jobs, choose station with lowest WIP
-                temp = sorted(avail_stations, key=attrgetter('stat_monitor.WIP_load_num_jobs'), reverse=True)
-                target_station: ProcessingStation = temp.pop()
-                logger_dispatcher.debug(f"[DISPATCHER: {self}] WIP LOAD NUM JOBS of {target_station=} is {target_station.stat_monitor.WIP_load_time:.2f}")
-            case 'AGENT':
-                # CHECK: agent available
-                pass
+            
+        if is_agent:
+            # get choosen station by tuple index (agent's action)
+            stat_idx = agent.action
+            target_station = avail_stations[stat_idx]
+            # check feasibility of the choosen target station
+            is_feasible = self._env.check_feasible_agent_alloc(
+                                            target_station=target_station,
+                                            op=op)
+            agent.action_feasible = is_feasible
+            logger_agents.debug(f"Action feasibility status: {is_feasible}")
         
         # [KPIs] reset all associated processing stations of that group to their original state
         infstruct_mgr.res_objs_temp_state(res_objs=stations, reset_temp=True)
@@ -1953,7 +1932,7 @@ class Dispatcher:
         
         logger_dispatcher.info(f"[DISPATCHER: {self}] REQUEST TO DISPATCHER FOR SEQUENCING")
         # set environment signal for SEQUENCING
-        self._env.set_dispatching_signal(sequencing=True, reset=False)
+        #self._env.set_dispatching_signal(sequencing=True, reset=False)
         
         # get logic queue of requesting object
         # contains all feasible jobs for this resource
@@ -1961,7 +1940,7 @@ class Dispatcher:
         # get job from logic queue with currently defined priority rule
         job = self.seq_priority_rule(queue=logic_queue)
         # reset environment signal for SEQUENCING
-        self._env.set_dispatching_signal(sequencing=True, reset=True)
+        #self._env.set_dispatching_signal(sequencing=True, reset=True)
         
         return job, job.current_proc_time, job.current_setup_time
     
@@ -2052,10 +2031,8 @@ class Dispatcher:
             'execution_system',
             'execution_system_custom_id',
             'prio',
-            #'entry_date',
             'planned_starting_date',
             'actual_starting_date',
-            #'exit_date',
             'planned_ending_date',
             'actual_ending_date',
             'proc_time',
@@ -2068,16 +2045,15 @@ class Dispatcher:
             'target_station_custom_id': True,
             'execution_system_custom_id': True,
             'prio': True,
-            #'entry_date': True,
             'planned_starting_date': True,
             'actual_starting_date': True,
-            #'exit_date': True,
             'planned_ending_date': True,
             'actual_ending_date': True,
             'proc_time': True,
             'setup_time': True,
             'order_time': True,
         }
+        # TODO: disable hover infos if some entries are None
         #hover_template: str = "proc_time: %{proc_time|%d:%H:%M:%S}"
         if dates_to_local_tz:
             target_db = self._op_db_date_adjusted
@@ -2088,7 +2064,6 @@ class Dispatcher:
         df = target_db.filter(items=filter_items)
         # calculate delta time between start and end
         # Timedelta
-        #df['delta'] = df['exit_date'] - df['entry_date']
         df['delta'] = df['actual_ending_date'] - df['actual_starting_date']
         
         # sorting
@@ -2155,119 +2130,7 @@ class Dispatcher:
             fig.write_image(file)
         
         return fig
-    
-    def draw_gantt_chart_old(
-        self,
-        use_custom_proc_station_id: bool = True,
-        sort_by_proc_station: bool = False,
-        sort_ascending: bool = True,
-        group_by_exec_system: bool = False,
-        save_img: bool = False,
-        save_html: bool = False,
-        file_name: str = 'gantt_chart',
-    ) -> PlotlyFigure:
-        """
-        draw a Gantt chart based on the dispatcher's operation database
-        use_custom_machine_id: whether to use the custom IDs of the processing station (True) or its name (False)
-        sort_by_proc_station: whether to sort by processing station property (True) or by job name (False) \
-            default: False
-        sort_ascending: whether to sort in ascending (True) or descending order (False) \
-            default: True
-        use_duration: plot each operation with its scheduled duration instead of the delta time \
-            between start and end; if there were no interruptions both methods return the same results \
-            default: False
-        """
-        # filter operation DB for relevant information
-        filter_items: list[str] = [
-            'job_name',
-            'target_station_custom_id',
-            'target_station_name',
-            'execution_system',
-            'execution_system_custom_id',
-            'prio',
-            'entry_date',
-            'exit_date',
-            'proc_time',
-            'setup_time',
-            'order_time',
-        ]
-        
-        hover_data: dict[str, str | bool] = {
-            'job_name': False,
-            'target_station_custom_id': True,
-            'execution_system_custom_id': True,
-            'prio': True,
-            'entry_date': True,
-            'exit_date': True,
-            'proc_time': True,
-            'setup_time': True,
-            'order_time': True,
-        }
-        
-        df = self._op_db.filter(items=filter_items)
-        # calculate delta time between start and end
-        # Timedelta
-        df['delta'] = df['exit_date'] - df['entry_date']
-        
-        # sorting
-        sort_key: str = ''
-        # choose relevant processing station property
-        proc_station_prop: str = ''
-        if use_custom_proc_station_id:
-            proc_station_prop = 'target_station_custom_id'
-        else:
-            proc_station_prop = 'target_station_name'
-        
-        # check if sorting by processing station is wanted and custom ID should be used or not
-        if sort_by_proc_station:
-            sort_key = proc_station_prop
-        else:
-            sort_key = 'job_name' 
-        
-        df = df.sort_values(by=sort_key, ascending=sort_ascending, kind='stable')
-        
-        # group by value
-        if group_by_exec_system:
-            group_by_key = 'execution_system_custom_id'
-        else:
-            group_by_key = 'job_name'
-        
-        # build Gantt chart with Plotly Timeline
-        fig: PlotlyFigure = px.timeline(
-            df, 
-            x_start='entry_date', 
-            x_end='exit_date', 
-            y=proc_station_prop, 
-            color=group_by_key,
-            hover_name='job_name',
-            hover_data=hover_data,
-        )
-        fig.update_yaxes(type='category', autorange='reversed')
-        fig.update_xaxes(type='linear')
 
-        # reset axis scale for every figure element
-        # https://stackoverflow.com/questions/66078893/plotly-express-timeline-for-gantt-chart-with-integer-xaxis
-        for d in fig.data:
-            try:
-                # convert to integer if property is of that type in the database
-                filt_val = int(d.name)
-            except ValueError:
-                filt_val = d.name
-            filt = df[group_by_key] == filt_val
-            d.x = df.loc[filt, 'delta']
-
-        fig.show()
-        
-        if save_html:
-            file = f'{file_name}.html'
-            fig.write_html(file)
-        
-        if save_img:
-            file = f'{file_name}.svg'
-            fig.write_image(file)
-        
-        return fig
-    
     def finalise(self) -> None:
         """
         method to be called at the end of the simulation run by 
@@ -2374,18 +2237,14 @@ class System(OrderedDict):
             raise AttributeError("There is already a registered AllocationAgent instance \
                                  Only one instance per system is allowed.")
     
-    def check_alloc_agent(self) -> None:
+    def check_alloc_agent(self) -> bool:
         """checks if an allocation agent is registered for the system
-
-        Raises
-        ------
-        NoAllocationAgentAssignedError
-            if no allocation agent was found
         """
-        if not self._alloc_agent_registered:
-            raise NoAllocationAgentAssignedError(f"The system {self} has no allocation agent assigned.")
+        if self._alloc_agent_registered:
+            #raise NoAllocationAgentAssignedError(f"The system {self} has no allocation agent assigned.")
+            return True
         else:
-            return None
+            return False
     
     def __str__(self) -> str:
         return f'System (type: {self._subsystem_type}, custom_id: {self._custom_identifier}, name: {self._name})'
@@ -3530,6 +3389,8 @@ class InfrastructureObject(System, sim.Component):
         placing
         """
         # ALLOCATION REQUEST
+        # TODO: check for changes in comments
+        # TODO: add dispatcher alloc evaluation
         ## call dispatcher --> request for allocation
         ## self._dispatcher.request_allocation ...
         ### input job
@@ -3544,10 +3405,11 @@ class InfrastructureObject(System, sim.Component):
         infstruct_mgr = self.env.infstruct_mgr
         # call dispatcher to check for allocation rule
         # if agent is set, do set flags and calculate feature vector
+        is_agent = dispatcher.check_alloc_dispatch(job=job)
         print(f'--------------- DEBUG: call before hold(0) at {self.env.t()}')
         yield self.hold(0)
         print(f'--------------- DEBUG: call after hold(0) at {self.env.t()}')
-        target_station = dispatcher.request_job_allocation(job=job)
+        target_station = dispatcher.request_job_allocation(job=job, is_agent=is_agent)
         #target_station = yield from dispatcher.request_job_allocation(job=job)
         
         ### UPDATE JOB PROCESS INFO IN REQUEST FUNCTION???
