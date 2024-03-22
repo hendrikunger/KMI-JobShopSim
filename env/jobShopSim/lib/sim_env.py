@@ -19,12 +19,11 @@ import pandas as pd
 from pandas import DataFrame, Series
 import plotly.express as px
 from plotly.graph_objs._figure import Figure
-from .utils import (flatten, DTParser, 
+from .utils import (flatten, DTManager, 
                     TIMEZONE_UTC, TIMEZONE_CEST, 
-                    DEFAULT_DATETIME, validate_dt_UTC,
-                    dt_to_timezone, adjust_db_dates_local_tz,
-                    current_time_tz, cut_dt_microseconds)
+                    DEFAULT_DATETIME, adjust_db_dates_local_tz)
 from .agents import AllocationAgent, SequencingAgent
+from .errors import AssociationError, ViolateStartingCondition
 
 # set Salabim to yield mode (using yield is mandatory)
 sim.yieldless(False)
@@ -45,7 +44,7 @@ FAIL_DELAY: float = 20.
 
 # logging
 # IPython compatibility
-logging.basicConfig(stream=sys.stdout, level=logging.DEBUG)
+logging.basicConfig(stream=sys.stdout)
 LOGGING_LEVEL = 'ERROR'
 LOGGING_LEVEL_ENV = 'INFO'
 LOGGING_LEVEL_DISPATCHER = 'DEBUG'
@@ -58,7 +57,7 @@ LOGGING_LEVEL_OPERATIONS = 'ERROR'
 LOGGING_LEVEL_BUFFERS = 'ERROR'
 LOGGING_LEVEL_MONITORS = 'ERROR'
 LOGGING_LEVEL_AGENTS = 'DEBUG'
-
+LOGGING_LEVEL_CONDITIONS = 'DEBUG'
 
 logger = logging.getLogger('sim_env.base')
 logger.setLevel(LOGGING_LEVEL)
@@ -80,6 +79,8 @@ logger_monitors = logging.getLogger('sim_env.monitors')
 logger_monitors.setLevel(LOGGING_LEVEL_MONITORS)
 logger_agents = logging.getLogger('sim_env.agents')
 logger_agents.setLevel(LOGGING_LEVEL_AGENTS)
+logger_conditions = logging.getLogger('sim_env.conditions')
+logger_conditions.setLevel(LOGGING_LEVEL_CONDITIONS)
 
 logger_jobs = logging.getLogger('sim_env.jobs')
 logger_jobs.setLevel(LOGGING_LEVEL_JOBS)
@@ -87,7 +88,7 @@ logger_operations = logging.getLogger('sim_env.operations')
 logger_operations.setLevel(LOGGING_LEVEL_OPERATIONS)
 
 
-# utility
+# UTILITIES
 def filter_processing_stations(
     infstruct_obj_collection: Iterable[InfrastructureObject]
 ) -> list[ProcessingStation]:
@@ -106,8 +107,11 @@ def filter_processing_stations(
     
     return [x for x in infstruct_obj_collection if isinstance(x, ProcessingStation)]
 
+# UTILITIES: Datetime Manager
+dt_mgr = DTManager()
 
-# environment
+
+# ENVIRONMENT
 
 class SimulationEnvironment(sim.Environment):
     
@@ -124,11 +128,11 @@ class SimulationEnvironment(sim.Environment):
         self.time_unit = time_unit
         # if starting datetime not provided use current time
         if starting_datetime is None:
-            starting_datetime = current_time_tz(cut_microseconds=True)
+            starting_datetime = dt_mgr.current_time_tz(cut_microseconds=True)
         else:
-            validate_dt_UTC(starting_datetime)
+            dt_mgr.validate_dt_UTC(starting_datetime)
             # remove microseconds, such accuracy not needed
-            starting_datetime = cut_dt_microseconds(dt=starting_datetime)
+            starting_datetime = dt_mgr.cut_dt_microseconds(dt=starting_datetime)
         self.starting_datetime = starting_datetime
         
         super().__init__(trace=False, time_unit=self.time_unit, datetime0=self.starting_datetime, **kwargs)
@@ -140,6 +144,12 @@ class SimulationEnvironment(sim.Environment):
         # [LOAD] job dispatcher
         self._dispatcher_registered: bool = False
         self._dispatcher: Dispatcher | None = None
+        
+        # ?? transient condition (working properly?)
+        # transient condition
+        # state allows direct waiting for flag changes
+        self.is_transient_cond: bool = True
+        self.transient_cond_state: State = sim.State('trans_cond', env=self)
         
         # !! remove later, signals now in agent class
         # [DECISION FLAGS]
@@ -155,6 +165,13 @@ class SimulationEnvironment(sim.Environment):
             simulation time in current time unit as Datetime object
         """
         return self.t_to_datetime(t=self.t())
+    
+    def td_to_simtime(
+        self,
+        timedelta: Timedelta,
+    ) -> float:
+        """transform Timedelta to simulation time"""
+        return self.timedelta_to_duration(timedelta=timedelta)
     
     @property
     def infstruct_mgr(self) -> InfrastructureManager:
@@ -274,6 +291,7 @@ class SimulationEnvironment(sim.Environment):
     ) -> 'FeatureVector':
         raise NotImplementedError("Building sequencing feature vectors is not supported yet.")
     
+    # ?? adding to Dispatcher class?
     def check_feasible_agent_alloc(
         self,
         target_station: ProcessingStation,
@@ -334,7 +352,7 @@ class SimulationEnvironment(sim.Environment):
         self._dispatcher.finalise()
 
 
-# environment management
+# ENVIRONMENT MANAGEMENT
 
 class InfrastructureManager:
     
@@ -1895,7 +1913,7 @@ class Dispatcher:
             stat_idx = agent.action
             target_station = avail_stations[stat_idx]
         """
-            
+        
         if is_agent:
             # get choosen station by tuple index (agent's action)
             stat_idx = agent.action
@@ -2141,7 +2159,7 @@ class Dispatcher:
         self._op_db_date_adjusted = adjust_db_dates_local_tz(db=self._op_db)
 
 
-# systems
+# SYSTEMS
 
 class System(OrderedDict):
     
@@ -2241,7 +2259,6 @@ class System(OrderedDict):
         """checks if an allocation agent is registered for the system
         """
         if self._alloc_agent_registered:
-            #raise NoAllocationAgentAssignedError(f"The system {self} has no allocation agent assigned.")
             return True
         else:
             return False
@@ -2504,7 +2521,7 @@ class StationGroup(System):
         super().add_subsystem(subsystem=subsystem)
 
 
-# monitors
+# MONITORS
 
 class Monitor:
     
@@ -2594,7 +2611,7 @@ class Monitor:
         #self.time_active: Timedelta = Timedelta()
         
         # time handling
-        self._dt_parser: DTParser = DTParser()
+        #self._dt_parser: DTParser = DTParser()
     
     def __repr__(self) -> str:
         return f"Monitor instance of {self._target_object}"
@@ -2733,7 +2750,7 @@ class Monitor:
         data.index = data.index.rename('state')
         # change time from Timedelta to any time unit possible --> float
         # Plotly can not handle Timedelta objects properly, only Datetimes
-        calc_td = self._dt_parser.timedelta_from_val(val=1., time_unit=time_unit)
+        calc_td = dt_mgr.timedelta_from_val(val=1., time_unit=time_unit)
         calc_col: str = f'total time [{time_unit}]'
         data[calc_col] = data['total time'] / calc_td
         data = data.sort_index(axis=0, kind='stable')
@@ -2768,7 +2785,7 @@ class Monitor:
         data.index = data.index.rename('state')
         # change time from Timedelta to any time unit possible --> float
         # Plotly can not handle Timedelta objects properly, only Datetimes
-        calc_td = self._dt_parser.timedelta_from_val(val=1., time_unit=time_unit)
+        calc_td = dt_mgr.timedelta_from_val(val=1., time_unit=time_unit)
         calc_col: str = f'total time [{time_unit}]'
         data[calc_col] = data['total time'] / calc_td
         data = data.sort_index(axis=0, kind='stable')
@@ -3174,7 +3191,7 @@ class InfStructMonitor(Monitor):
             data = self._WIP_time_db.copy()
             # change WIP load time from Timedelta to any time unit possible --> float
             # Plotly can not handle Timedelta objects properly, only Datetimes
-            calc_td = self._dt_parser.timedelta_from_val(val=1., time_unit=time_unit_load_time)
+            calc_td = dt_mgr.timedelta_from_val(val=1., time_unit=time_unit_load_time)
             data['level'] = data['level'] / calc_td
             title = f'WIP Level Time of {self._target_object}'
             yaxis = 'WIP Level Time [time units]'
@@ -3215,7 +3232,7 @@ class InfStructMonitor(Monitor):
         return fig
 
 
-# infrastructure components
+# INFRASTRUCTURE COMPONENTS
 
 class InfrastructureObject(System, sim.Component):
     
@@ -3314,13 +3331,13 @@ class InfrastructureObject(System, sim.Component):
     @property
     def stat_monitor(self) -> Monitor:
         return self._stat_monitor
-    
+    """
     def td_to_simtime(
         self,
         timedelta: Timedelta,
     ) -> float:
         return self.env.timedelta_to_duration(timedelta=timedelta)
-    
+    """
     @property
     def use_const_setup_time(self) -> bool:
         return self._use_const_setup_time
@@ -3405,6 +3422,7 @@ class InfrastructureObject(System, sim.Component):
         infstruct_mgr = self.env.infstruct_mgr
         # call dispatcher to check for allocation rule
         # if agent is set, do set flags and calculate feature vector
+        yield self.hold(0)
         is_agent = dispatcher.check_alloc_dispatch(job=job)
         print(f'--------------- DEBUG: call before hold(0) at {self.env.t()}')
         yield self.hold(0)
@@ -3532,7 +3550,7 @@ class InfrastructureObject(System, sim.Component):
             dispatcher.update_job_state(job=job, state='SETUP')
             logger_prodStations.debug(f"[START SETUP] job ID {job.job_id} at {self.env.now()} on machine ID {self.custom_identifier} \
                 with setup time {self.setup_time}")
-            sim_time = self.td_to_simtime(timedelta=self.setup_time)
+            sim_time = self.env.td_to_simtime(timedelta=self.setup_time)
             #yield self.hold(self.setup_time)
             yield self.hold(sim_time)
         
@@ -3678,7 +3696,7 @@ class ProcessingStation(InfrastructureObject):
             logger_prodStations.debug(f"[START] job ID {job.job_id} at {self.env.now()} on machine ID {self.custom_identifier} \
                 with proc time {self.proc_time}")
             # PROCESSING
-            sim_time = self.td_to_simtime(timedelta=self.proc_time)
+            sim_time = self.env.td_to_simtime(timedelta=self.proc_time)
             yield self.hold(sim_time)
             # RELEVANT INFORMATION AFTER PROCESSING
             dispatcher.update_job_process_info(job=job, preprocess=False)
@@ -3850,7 +3868,7 @@ class Source(InfrastructureObject):
         proc_time: Timedelta = Timedelta(hours=2),
         random_generation: bool = False,
         job_generator: RandomJobGenerator | None = None,
-        num_gen_jobs: int = 5,
+        num_gen_jobs: int | None = None,
         **kwargs,
     ) -> None:
         """
@@ -3873,13 +3891,24 @@ class Source(InfrastructureObject):
         
         # parameters
         self.proc_time = proc_time
-        self.num_gen_jobs = num_gen_jobs
+        # indicator if an time equivalent should be used
+        self.use_stop_time: bool = False
+        self.num_gen_jobs: int | None = None
+        if num_gen_jobs is not None:
+            self.num_gen_jobs = num_gen_jobs
+        else:
+            self.use_stop_time = True
+        
+        # triggers and flags
+        # indicator if a corresponding ConditionSetter was regsitered
+        self.stop_job_gen_cond_reg: bool = False
+        self.stop_job_gen_state: State = sim.State('stop_job_gen', env=self.env)
     
     def _obtain_proc_time(self) -> float:
         """
         function to generate a constant or random processing time
         """
-        proc_time = self.td_to_simtime(timedelta=self.proc_time)
+        proc_time = self.env.td_to_simtime(timedelta=self.proc_time)
         if self.random_generation:
             # random generation, add later
             return proc_time
@@ -3890,9 +3919,14 @@ class Source(InfrastructureObject):
     def pre_process(self) -> None:
         infstruct_mgr = self.env.infstruct_mgr
         infstruct_mgr.update_res_state(obj=self, state='PROCESSING')
+        
+        # check if ConditionSetter is registered if needed
+        if self.use_stop_time and not self.stop_job_gen_cond_reg:
+            raise ValueError((f"[SOURCE {self}]: Stop time condition should be used, "
+                              "but no ConditionSetter is registered"))
     
     def sim_control(self) -> Generator[None, None, None]:
-        # id counter for debugging, else endless generation
+        # counter for debugging, else endless generation
         count = 0
         infstruct_mgr = self.env.infstruct_mgr
         dispatcher = self.env.dispatcher
@@ -3919,7 +3953,18 @@ class Source(InfrastructureObject):
             # map production area custom ID to the associated station group custom IDs
             stat_group_ids[PA_custom_id] = candidates
         
-        while count < self.num_gen_jobs:
+        while True:
+            
+            if not self.use_stop_time:
+                # use number of generated jobs as stopping criterion
+                if count == self.num_gen_jobs:
+                    break
+            else:
+                # stop if stopping time is reached
+                # flag set by corresponding ConditionSetter
+                if self.stop_job_gen_state.get() == True:
+                    break
+            
             # start at t=0 with generation
             # generate object
             ## random job properties
@@ -3933,7 +3978,6 @@ class Source(InfrastructureObject):
              proc_times, setup_times) = self.job_generator.gen_rnd_job_by_ids(
                 exec_system_ids=prod_area_custom_ids,
                 target_station_group_ids=stat_group_ids,
-                #target_station_group_ids=None,
                 min_proc_time=5,
                 gen_setup_times=True,
             )
@@ -4029,7 +4073,7 @@ class Sink(InfrastructureObject):
         pass
 
 
-# load components
+# LOAD COMPONENTS
 
 class Operation:
     
@@ -4107,10 +4151,10 @@ class Operation:
         # starting and end dates
         # validate time zone information for given datetime objects
         if planned_starting_date is not None:
-            validate_dt_UTC(planned_starting_date)
+            dt_mgr.validate_dt_UTC(planned_starting_date)
         self.time_planned_starting = planned_starting_date
         if planned_starting_date is not None:
-            validate_dt_UTC(planned_ending_date)
+            dt_mgr.validate_dt_UTC(planned_ending_date)
         self.time_planned_ending = planned_ending_date
         # in future setting starting points in advance possible
         self.is_finished: bool = False
@@ -4283,7 +4327,7 @@ class Job(sim.Component):
             op_starting_dates: list[None] = [None] * len(proc_times)
             # validate time zone information for given datetime object
             if planned_starting_date is not None:
-                validate_dt_UTC(planned_starting_date)
+                dt_mgr.validate_dt_UTC(planned_starting_date)
             self.time_planned_starting = planned_starting_date
         if isinstance(planned_ending_date, Sequence):
             # operation-wise defined ending dates
@@ -4296,7 +4340,7 @@ class Job(sim.Component):
             op_ending_dates: list[None] = [None] * len(proc_times)
             # validate time zone information for given datetime object
             if planned_ending_date is not None:
-                validate_dt_UTC(planned_ending_date)
+                dt_mgr.validate_dt_UTC(planned_ending_date)
             self.time_planned_ending = planned_ending_date
         
         ### VALIDITY CHECK ###
@@ -4537,4 +4581,199 @@ class Job(sim.Component):
         else:
             return False
     """
+# !! USE LATER AS COMMON BASIS
+# !! code duplicated with InfrastructureObject
+# ?? possible to make ``BaseComponent`` class
+# !! conditions in separate module
+class BaseComponent(sim.Component):
+    
+    def __init__(
+        self,
+        env: SimulationEnvironment,
+        name: str | None = None,
+        **kwargs,
+    ) -> None:
+        
+        # environment
+        self.env = env
+        # [SALABIM COMPONENT] intialise base class
+        process: str = 'main_logic'
+        super().__init__(env=env, name=name, process=process,
+                         suppress_trace=True, **kwargs)
+    
+    ### PROCESS LOGIC
+    # each method of 'pre_process', 'sim_control', 'post_process' must be implemented in the child classes
+    def pre_process(self) -> None:
+        """return type: tuple with parameters or None"""
+        raise NotImplementedError(f"No pre-process method for {self} of type {self.__class__.__name__} defined.")
+    
+    def sim_control(self) -> None:
+        """return type: tuple with parameters or None"""
+        raise NotImplementedError(f"No sim-control method for {self} of type {self.__class__.__name__} defined.")
+    
+    def post_process(self) -> None:
+        """return type: tuple with parameters or None"""
+        raise NotImplementedError(f"No post-process method for {self} of type {self.__class__.__name__} defined.")
+    
+    def main_logic(self) -> Generator[Any, None, None]:
+        """main logic loop for all resources in the simulation environment"""
+        logger.debug(f"----> Process logic of {self}")
+        # pre control logic
+        ret = self.pre_process()
+        # main control logic
+        if ret is not None:
+            ret = yield from self.sim_control(*ret)
+        else:
+            ret = yield from self.sim_control()
+        # post control logic
+        if ret is not None:
+            ret = self.post_process(*ret)
+        else:
+            ret = self.post_process()
 
+class ConditionSetter(BaseComponent):
+    
+    def __init__(
+        self,
+        env: SimulationEnvironment,
+        **kwargs,
+    ) -> None:
+        # intialise base class
+        super().__init__(env=env, **kwargs)
+        
+    def __str__(self) -> str:
+        return f"{self.__class__.__name__}"
+
+class TransientCondition(ConditionSetter):
+    
+    def __init__(
+        self,
+        env: SimulationEnvironment,
+        duration_transient: Timedelta,
+        **kwargs,
+    ) -> None:
+        # duration after which the condition is set
+        self.duration_transient = duration_transient
+        # intialise base class
+        super().__init__(env=env, **kwargs)
+    
+    ### PROCESS LOGIC
+    # each method of 'pre_process', 'sim_control', 'post_process' must be implemented in the child classes
+    def pre_process(self) -> None:
+        # validate that starting condition is met
+        # check transient phase of environment
+        if self.env.is_transient_cond != True:
+            raise ViolateStartingCondition(f"Environment {self.env.name()} not in transient state!")
+    
+    def sim_control(self) -> None:
+        # convert transient duration to simulation time
+        sim_time = self.env.td_to_simtime(timedelta=self.duration_transient)
+        # wait for the given time interval
+        yield self.hold(sim_time, priority=-10)
+        # set environment flag and state
+        self.env.is_transient_cond = False
+        self.env.transient_cond_state.set()
+        logger_conditions.info((f"[CONDITION {self}]: Transient Condition over. Set >>is_transient_cond<< "
+                                f"of env to >>{self.env.is_transient_cond}<<"))
+    
+    def post_process(self) -> None:
+        pass
+
+class JobGenDurationCondition(ConditionSetter):
+    
+    def __init__(
+        self,
+        env: SimulationEnvironment,
+        target_obj: Source,
+        sim_run_until: Datetime | None = None,
+        sim_run_duration: Timedelta | None = None,
+        **kwargs,
+    ) -> None:
+        # intialise base class
+        super().__init__(env=env, **kwargs)
+        
+        # either point in time or duration must be provided
+        if any((sim_run_until, sim_run_duration)) == False:
+            # both None
+            raise ValueError("Either point in time or duration must be provided")
+        elif all((sim_run_until, sim_run_duration)) == True:
+            # both provided
+            raise ValueError("Point in time and duration provided. Only one allowed.")
+        
+        # get starting datetime of environment
+        starting_dt = self.env.starting_datetime
+        
+        if sim_run_until is not None:
+            # check if point in time is provided with UTC time zone
+            dt_mgr.validate_dt_UTC(dt=sim_run_until)
+            # check if point in time is in the past
+            if sim_run_until <= starting_dt:
+                raise ValueError(("Point in time must not be in the past. "
+                                  f"Starting Time Env: {starting_dt}, "
+                                  f"Point in time provided: {sim_run_until}"))
+            # calculate duration from starting datetime
+            # duration after which the condition is set
+            self.sim_run_duration = sim_run_until - starting_dt
+        else:
+            # duration after which the condition is set
+            self.sim_run_duration = sim_run_duration
+        
+        # point in time after which the condition is set
+        self.sim_run_until = sim_run_until
+        
+        # target object (source)
+        self.target_obj = target_obj
+        # register in object
+        self.target_obj.stop_job_gen_cond_reg = True
+    
+    ### PROCESS LOGIC
+    # each method of 'pre_process', 'sim_control', 'post_process' must be implemented in the child classes
+    def pre_process(self) -> None:
+        # validate that starting condition is met
+        # check transient phase of environment
+        if self.target_obj.stop_job_gen_state.get() != False:
+            raise ViolateStartingCondition(f"Target object {self.target_obj}: Flag not unset!")
+    
+    def sim_control(self) -> None:
+        # convert transient duration to simulation time
+        sim_time = self.env.td_to_simtime(timedelta=self.sim_run_duration)
+        # wait for the given time interval
+        yield self.hold(sim_time, priority=-10)
+        
+        # [TARGET]
+        # set flag or state
+        self.target_obj.stop_job_gen_state.set()
+        logger_conditions.info((f"[CONDITION {self}]: Job Generation Condition met at "
+                                f"{self.env.t_as_dt()}"))
+    
+    def post_process(self) -> None:
+        pass
+
+class TriggerAgentCondition(ConditionSetter):
+    
+    def __init__(
+        self,
+        env: SimulationEnvironment,
+        **kwargs,
+    ) -> None:
+        # intialise base class
+        super().__init__(env=env, **kwargs)
+    
+    ### PROCESS LOGIC
+    # each method of 'pre_process', 'sim_control', 'post_process' must be implemented in the child classes
+    def pre_process(self) -> None:
+        # validate that starting condition is met
+        # check transient phase of environment
+        if self.env.transient_cond_state.get() != False:
+            raise ViolateStartingCondition((f"Environment {self.env.name()} transient state: "
+                                            "sim.State already set!"))
+    
+    def sim_control(self) -> None:
+        # wait for the given time interval
+        yield self.wait(self.env.transient_cond_state, priority=-9)
+        # change allocation rule of dispatcher
+        self.env.dispatcher.curr_alloc_rule = 'AGENT'
+        logger_conditions.info((f"[CONDITION {self}]: Set allocation rule to >>AGENT<<"))
+    
+    def post_process(self) -> None:
+        pass

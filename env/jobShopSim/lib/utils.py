@@ -43,7 +43,7 @@ def flatten(
 
 ### date and time handling ###
 
-class DTParser:
+class DTManager:
     
     def __init__(
         self
@@ -72,7 +72,14 @@ class DTParser:
             'milliseconds',
             'microseconds',
         ])
-        
+    
+    def dt_with_tz_UTC(
+        self,
+        *args,
+        **kwargs,
+    )-> Datetime:
+        return Datetime(*args, **kwargs, tzinfo=TIMEZONE_UTC)
+    
     def timedelta_from_val(
         self,
         val: float,
@@ -119,122 +126,127 @@ class DTParser:
                 
         return ret
 
-def current_time_tz(
-    tz: TZInfo = TIMEZONE_UTC,
-    cut_microseconds: bool = False,
-) -> Datetime:
-    """current time as datetime object with
-    associated time zone information (UTC by default)
+    def current_time_tz(
+        self,
+        tz: TZInfo = TIMEZONE_UTC,
+        cut_microseconds: bool = False,
+    ) -> Datetime:
+        """current time as datetime object with
+        associated time zone information (UTC by default)
 
-    Parameters
-    ----------
-    tz : TZInfo, optional
-        time zone information, by default TIMEZONE_UTC
+        Parameters
+        ----------
+        tz : TZInfo, optional
+            time zone information, by default TIMEZONE_UTC
 
-    Returns
-    -------
-    Datetime
-        datetime object with corresponding time zone
-    """
-    if cut_microseconds:
-        return Datetime.now(tz=tz).replace(microsecond=0)
-    else:
-        return Datetime.now(tz=tz)
+        Returns
+        -------
+        Datetime
+            datetime object with corresponding time zone
+        """
+        if cut_microseconds:
+            return Datetime.now(tz=tz).replace(microsecond=0)
+        else:
+            return Datetime.now(tz=tz)
 
-def add_timedelta_with_tz(
-    starting_dt: Datetime,
-    td: Timedelta,
-) -> Datetime:
-    """time-zone-aware calculation of an end point in time 
-    with a given timedelta
+    def add_timedelta_with_tz(
+        self,
+        starting_dt: Datetime,
+        td: Timedelta,
+    ) -> Datetime:
+        """time-zone-aware calculation of an end point in time 
+        with a given timedelta
 
-    Parameters
-    ----------
-    starting_dt : Datetime
-        starting point in time
-    td : Timedelta
-        duration as timedelta object
+        Parameters
+        ----------
+        starting_dt : Datetime
+            starting point in time
+        td : Timedelta
+            duration as timedelta object
 
-    Returns
-    -------
-    Datetime
-        time-zone-aware end point
-    """
-    
-    if starting_dt.tzinfo is None:
-        # no time zone information
-        raise RuntimeError("The provided starting date does not contain time zone information.")
-    else:
-        # obtain time zone information from starting datetime object
-        tz_info = starting_dt.tzinfo
+        Returns
+        -------
+        Datetime
+            time-zone-aware end point
+        """
+        
+        if starting_dt.tzinfo is None:
+            # no time zone information
+            raise RuntimeError("The provided starting date does not contain time zone information.")
+        else:
+            # obtain time zone information from starting datetime object
+            tz_info = starting_dt.tzinfo
 
-    # transform starting point in time to utc
-    dt_utc = starting_dt.astimezone(TIMEZONE_UTC)
-    # all calculations are done in UTC
-    # add duration
-    ending_dt_utc = dt_utc + td
-    # transform back to previous time zone
-    ending_dt = ending_dt_utc.astimezone(tz=tz_info)
-    
-    return ending_dt
+        # transform starting point in time to utc
+        dt_utc = starting_dt.astimezone(TIMEZONE_UTC)
+        # all calculations are done in UTC
+        # add duration
+        ending_dt_utc = dt_utc + td
+        # transform back to previous time zone
+        ending_dt = ending_dt_utc.astimezone(tz=tz_info)
+        
+        return ending_dt
 
-def validate_dt_UTC(
-    dt: Datetime,
-) -> None:
-    """_summary_
+    def validate_dt_UTC(
+        self,
+        dt: Datetime,
+    ) -> None:
+        """_summary_
 
-    Parameters
-    ----------
-    dt : Datetime
-        datetime object to be checked for available UTC time zone
-        information
+        Parameters
+        ----------
+        dt : Datetime
+            datetime object to be checked for available UTC time zone
+            information
 
-    Raises
-    ------
-    ValueError
-        if no UTC time zone information is found
-    """
-    
-    if dt.tzinfo != TIMEZONE_UTC:
-        raise ValueError(f"Datetime object {dt} does not contain "
-                         "necessary UTC time zone information")
+        Raises
+        ------
+        ValueError
+            if no UTC time zone information is found
+        """
+        
+        if dt.tzinfo != TIMEZONE_UTC:
+            raise ValueError(f"Datetime object {dt} does not contain "
+                            "necessary UTC time zone information")
 
-def dt_to_timezone(
-    dt: Datetime,
-    target_tz: TZInfo = TIMEZONE_CEST,
-) -> Datetime:
-    """_summary_
+    def dt_to_timezone(
+        self,
+        dt: Datetime,
+        target_tz: TZInfo = TIMEZONE_CEST,
+    ) -> Datetime:
+        """_summary_
 
-    Parameters
-    ----------
-    dt : Datetime
-        datetime with time zone information
-    target_tz : TZInfo, optional
-        target time zone information, by default TIMEZONE_CEST
+        Parameters
+        ----------
+        dt : Datetime
+            datetime with time zone information
+        target_tz : TZInfo, optional
+            target time zone information, by default TIMEZONE_CEST
 
-    Returns
-    -------
-    Datetime
-        datetime object adjusted to given local time zone
+        Returns
+        -------
+        Datetime
+            datetime object adjusted to given local time zone
 
-    Raises
-    ------
-    RuntimeError
-        if datetime object does not contain time zone information
-    """
-    
-    if dt.tzinfo is None:
-        # no time zone information
-        raise RuntimeError("The provided starting date does not contain time zone information.")
-    # transform to given target time zone
-    dt_local_tz = dt.astimezone(tz=target_tz)
-    
-    return dt_local_tz
+        Raises
+        ------
+        RuntimeError
+            if datetime object does not contain time zone information
+        """
+        
+        if dt.tzinfo is None:
+            # no time zone information
+            raise RuntimeError("The provided starting date does not contain time zone information.")
+        # transform to given target time zone
+        dt_local_tz = dt.astimezone(tz=target_tz)
+        
+        return dt_local_tz
 
-def cut_dt_microseconds(
-    dt: Datetime,
-) -> Datetime:
-    return dt.replace(microsecond=0)
+    def cut_dt_microseconds(
+        self,
+        dt: Datetime,
+    ) -> Datetime:
+        return dt.replace(microsecond=0)
 
 
 # data wrangling
@@ -255,13 +267,13 @@ def adjust_db_dates_local_tz(
     db: DataFrame,
     tz: TZInfo = TIMEZONE_CEST,
 ) -> DataFrame:
-    
+    dt_mgr = DTManager()
     db = db.copy()
     # obtain date columns from database
     date_cols = get_date_cols_from_db(db=db)
     # adjust UTC times to local time zone provided
     temp1 = db[date_cols]
-    temp1 = temp1.applymap(dt_to_timezone, na_action='ignore')
+    temp1 = temp1.applymap(dt_mgr.dt_to_timezone, na_action='ignore')
     db[date_cols] = temp1
     
     return db.copy()
