@@ -45,11 +45,11 @@ FAIL_DELAY: float = 20.
 # logging
 # IPython compatibility
 logging.basicConfig(stream=sys.stdout)
-LOGGING_LEVEL = 'ERROR'
+LOGGING_LEVEL = 'DEBUG'
 LOGGING_LEVEL_ENV = 'INFO'
-LOGGING_LEVEL_DISPATCHER = 'DEBUG'
+LOGGING_LEVEL_DISPATCHER = 'ERROR'
 LOGGING_LEVEL_INFSTRCT = 'INFO'
-LOGGING_LEVEL_SOURCES = 'ERROR'
+LOGGING_LEVEL_SOURCES = 'DEBUG'
 LOGGING_LEVEL_SINKS = 'ERROR'
 LOGGING_LEVEL_PRODSTATIONS = 'ERROR'
 LOGGING_LEVEL_JOBS = 'ERROR'
@@ -57,7 +57,7 @@ LOGGING_LEVEL_OPERATIONS = 'ERROR'
 LOGGING_LEVEL_BUFFERS = 'ERROR'
 LOGGING_LEVEL_MONITORS = 'ERROR'
 LOGGING_LEVEL_AGENTS = 'DEBUG'
-LOGGING_LEVEL_CONDITIONS = 'DEBUG'
+LOGGING_LEVEL_CONDITIONS = 'ERROR'
 
 logger = logging.getLogger('sim_env.base')
 logger.setLevel(LOGGING_LEVEL)
@@ -339,6 +339,15 @@ class SimulationEnvironment(sim.Environment):
             raise AssociationError("Non-associated subsystems detected!")
         
         logger_env.info(f"Integrity check for Environment {self.name()} successful.")
+    
+    def initialise(self) -> None:
+        # infrastructure manager instance
+        self._infstruct_mgr.initialise()
+        
+        # dispatcher instance
+        self._dispatcher.initialise()
+        
+        logger_env.info(f"Initialisation for Environment {self.name()} successful.")
     
     def finalise(self) -> None:
         """
@@ -846,6 +855,12 @@ class InfrastructureManager:
             # calculate KPIs if 'TEMP' state is set
             if not reset_temp:
                 obj.stat_monitor.calc_KPI()
+    
+    def initialise(self) -> None:
+        for prod_area in self._prod_area_db['prod_area']:
+            prod_area.initialise()
+        for station_group in self._station_group_db['station_group']:
+            station_group.initialise()
     
     def finalise(self) -> None:
         
@@ -1623,29 +1638,39 @@ class Dispatcher:
     def check_alloc_dispatch(
         self,
         job: Job,
-    ) -> bool:
+    ) -> tuple[bool, AllocationAgent]:
         # get next operation of job
         next_op = self.get_next_operation(job=job)
+        is_agent: bool = False
         if self._curr_alloc_rule == 'AGENT':
+            # only check agent availability if next operation exists
             if next_op is not None:
                 target_exec_system = next_op.target_exec_system
                 # check agent availability
                 is_agent = target_exec_system.check_alloc_agent()
-            else:
-                is_agent = False
-        else:
-            # if allocation rule is not >>AGENT<< flag is always False
-            is_agent = False
+        # if allocation rule is not >>AGENT<< flag is always False
         
-        # only call agent if OP is available
+        # reset feasible flag to False if agent present
+        agent: AllocationAgent | None = None
         if is_agent:
-            # agent available, get necessary information for decision
             agent = target_exec_system.alloc_agent
-            # request decision from agent, sets internal flag
-            agent.request_decision(disposable_job=job)
-            logger_dispatcher.debug(f"[DISPATCHER: {self}] Alloc Agent found. Decision request made.")
+            agent.action_feasible = False
         
-        return is_agent
+        return is_agent, agent
+    
+    def request_agent_alloc(
+        self,
+        job: Job,
+    ) -> None:
+        # get the target operation of the job
+        op = job.current_op
+        # execution system of current OP
+        target_exec_system = op.target_exec_system
+        # agent available, get necessary information for decision
+        agent = target_exec_system.alloc_agent
+        # request decision from agent, sets internal flag
+        agent.request_decision(job=job, op=op)
+        logger_dispatcher.debug(f"[DISPATCHER: {self}] Alloc Agent: Decision request made.")
     
     def request_job_allocation(
         self,
@@ -1657,26 +1682,16 @@ class Dispatcher:
         (determine the next processing station on which the job shall be placed)
         
         1. obtaining the target station group
-        2. select from target station group (e.g. calling RL agent for that group)
+        2. select from target station group
         3. return target station (InfrastructureObject)
         
         requester: output side infrastructure object
         request for: infrastructure object instance
         """
-        # SIGNALING ALLOCATION DECISION
-        # (ONLY IF PARALLEL PROCESSING STATIONS EXIST)
-        ## theoretically: obtaining next operation --> information about machine group -->
-        ## based on machine group: choice of corresponding allocation agent -->
-        ## preparing feature vectors as input --> trigger agent decision -->
-        ## map decision to processing station
         
-        #logger_dispatcher.info(f"[DISPATCHER: {self}] REQUEST TO DISPATCHER FOR ALLOCATION")
-        # set environment signal for ALLOCATION
-        #self._env.set_dispatching_signal(sequencing=False, reset=False)
-        #self._env.main().activate()
-        #yield job.hold(0)
+        logger_dispatcher.debug(f"[DISPATCHER: {self}] REQUEST TO DISPATCHER FOR ALLOCATION")
         
-        ## REWORK: NEW TOP-DOWN-APPROACH
+        ## NEW TOP-DOWN-APPROACH
         # routing of jobs is now organized in a hierarchical fashion and can be described
         # for each hierarchy level separately
         # routing in Production Areas --> Station Groups --> Processing Stations
@@ -1701,13 +1716,9 @@ class Dispatcher:
             target_exec_system = op.target_exec_system
             # get target station group
             target_station_group = op.target_station_group
-           
-            ##### PROCEDURE AGENT DECISION
-            # build feature vector of the target station collection + given job instance
-            # go into target station choice...
-            ### ADD OBTAINED TARGET STATION GROUP
-            logger_dispatcher.debug(f"[DISPATCHER: {self}] Next operation {op}")
             
+            logger_dispatcher.debug(f"[DISPATCHER: {self}] Next operation {op}")
+            # obtain target station (InfrastructureObject)
             target_station = self._choose_target_station_from_exec_system(
                                             exec_system=target_exec_system,
                                             op=op,
@@ -1737,17 +1748,7 @@ class Dispatcher:
         is_agent: bool,
         target_station_group: StationGroup | None = None,
     ) -> ProcessingStation:
-        """REWORK Choosing a target station from a given collection of processing stations
-
-        Parameters
-        ----------
-        stations : Iterable[ProcessingStation]
-            collection of processing stations from which the target station should be obtained
-
-        Returns
-        -------
-        ProcessingStation
-            station object on which the job should be placed
+        """ !! add description
         """
         # 3 options:
         # (1) choice between processing stations of the current area
@@ -1760,13 +1761,16 @@ class Dispatcher:
         
         # obtain the lowest level systems (only ProcessingStations) of 
         # that area or station group
-        #if target_station_group is not None and self._curr_alloc_rule != 'AGENT':
+        # agent chooses from its associated objects
         if target_station_group is not None and not is_agent:
             # preselection of station group only with allocation rules other than >>AGENT<<
-            stations = target_station_group.lowest_level_subsystems(only_processing_stations=True)
+            # returned ProcessingStations automatically feasible regarding thier StationGroup
+            stations = target_station_group.assoc_proc_stations
+            #stations = target_station_group.lowest_level_subsystems(only_processing_stations=True)
         else:
-            # choose from whole production area (>>AGENT<< always)
-            stations = exec_system.lowest_level_subsystems(only_processing_stations=True)
+            # choose from whole production area
+            stations = exec_system.assoc_proc_stations
+            #stations = exec_system.lowest_level_subsystems(only_processing_stations=True)
         
         # infrastructure manager
         infstruct_mgr = self.env.infstruct_mgr
@@ -1774,11 +1778,31 @@ class Dispatcher:
         # put all associated processing stations of that group in 'TEMP' state
         infstruct_mgr.res_objs_temp_state(res_objs=stations, reset_temp=False)
         
+        # ?? CALC REWARD?
+        # Action t=t, Reward calc t=t+1 == R_t
+        # first action no reward calculation
+        # calculated reward at this point in time is result of previous action
+        
         # available stations
-        ## AGENT can choose from all stations, not only available ones
-        ## availability of processing stations is checked in the feasibility method
-        #if self._curr_alloc_rule != 'AGENT':
-        if not is_agent:
+        ## AGENT can choose from all associated stations, not only available ones
+        ## availability of processing stations should be learned by the agent
+        ## using the utilisation as reward parameter
+        if is_agent:
+            # get agent from execution system
+            agent = exec_system.alloc_agent
+            # available stations are the associated ones
+            avail_stations = agent.assoc_proc_stations
+            # Feature vector already built when request done to agent
+            # request is being made and feature vector obtained
+            # get choosen station by tuple index (agent's action)
+            station_idx = agent.action
+            target_station = avail_stations[station_idx]
+            # check feasibility of the choosen target station
+            agent.action_feasible = self._env.check_feasible_agent_alloc(
+                                            target_station=target_station,
+                                            op=op)
+            logger_agents.debug(f"Action feasibility status: {agent.action_feasible}")
+        else:
             # choose only from available processing stations
             candidates: list[ProcessingStation] = [ps for ps in stations if ps.stat_monitor.is_available]
             # if there are no available ones: use all stations
@@ -1786,144 +1810,29 @@ class Dispatcher:
                 avail_stations = candidates
             else:
                 avail_stations = stations
-        else:
-            # check agent availability
-            #exec_system.check_alloc_agent()
-            # get agent from execution system
-            agent = exec_system.alloc_agent
-            # available stations are the associated ones
-            avail_stations = agent.assoc_infstrct_objs
-            # !! Feature vector already built in checking method
-            # !! request is being made and feature vector obtained
             
+            # ** Allocation Rules
+            # apply different strategies to select a station out of the station group
+            match self._curr_alloc_rule:
+                case 'RANDOM':
+                    # [RANDOM CHOICE]
+                    target_station: ProcessingStation = random.choice(avail_stations)
+                case 'UTILISATION':
+                    # [UTILISATION]
+                    # choose the station with the lowest utilisation to time
+                    target_station: ProcessingStation = min(avail_stations, key=attrgetter('stat_monitor.utilisation'))
+                    logger_dispatcher.debug(f"[DISPATCHER: {self}] Utilisation of {target_station=} is {target_station.stat_monitor.utilisation:.4f}")
+                case 'WIP_LOAD_TIME':
+                    # WIP as load/processing time, choose station with lowest WIP
+                    target_station: ProcessingStation = min(avail_stations, key=attrgetter('stat_monitor.WIP_load_time'))
+                    logger_dispatcher.debug(f"[DISPATCHER: {self}] WIP LOAD TIME of {target_station=} is {target_station.stat_monitor.WIP_load_time}")
+                case 'WIP_LOAD_JOBS':
+                    # WIP as number of associated jobs, choose station with lowest WIP
+                    target_station: ProcessingStation = min(avail_stations, key=attrgetter('stat_monitor.WIP_load_num_jobs'))
+                    logger_dispatcher.debug(f"[DISPATCHER: {self}] WIP LOAD NUM JOBS of {target_station=} is {target_station.stat_monitor.WIP_load_time:.2f}")
             
-            
-            ### CALL BUILDING FEATURE VECTOR ###
-            # procedure:
-            # (0) Gym reset (startup phase)
-            # (1) build feature vector [in this branch]
-            # (2) pause simulation run (by creating an conditional loop)
-            # (3) send observation / built feature vector 
-            #     to Gym-Env (through agent property --> 'feat_vec')
-            #     call: internal or external?
-            # (4) get agent decision from Gym-Env (call to step function)
-            # (5) write decision back to agent as property
-            # (6) continue simulation with written action (should resume in this branch)
-            # (7) in same time step:
-            # (7.1) check feasible action
-            # (7.2) calculate reward (implemented in agent)
-            # (7.3) jump to (1) and use this feature vector as observation at (2)
-            
-            # indicate that request is being done
-            # must be blocking
-            #agent.request_decision(disposable_job=job)
-            #agent.activate()
-            
-            # main problem:
-            # execution flow is not interrupted in salabim, thus program
-            # execution continues --> env.step() method only finalises if next event is reached
-            # to use salabim's internal handling the creation of an event is necessary, which is
-            # only possible by using salabim's modelling techniques
-            # problem: techniques can be used solely by salabim components
-            
-            # !! Important: new logic
-            # possible solution: use modelling flow before dispatcher call, placeholder: self.hold(0)
-            # tested execution flow with hold(0): creates events at the same point in time
-            # --> idea:
-            # call dispatcher method to evaluate allocation rule -> ret: True (agent) False (otherwise)
-            # if agent: set flags and build feature vector
-            # yield self.hold(0) from calling component
-            # env.step() should stop after execution of flag setting at point self.hold(0)
-            # which allows the external loop to terminate and trigger an agent decision
-            ## decision saved in agent properties
-            # resume execution: should finally obtain the target station object ('request_job_allocation')
-            ## standard way if no agent decision, otherwise use agent properties
-            
-            # inside method: set flags, build feature vector
-            # agent obtains associated stations by the connected ProductionArea and its subsystems
-            #agent.build_feat_vec(disposable_job=job)
-            #time.sleep(5)
-            """
-            while not agent.RL_decision_done:
-                # wait for agent decision
-                # when decision is done in Gym Env: communicate decision by
-                # calling agent's method 'set_decision'
-                
-                # SIMULATE ACTION CHOICE
-                # deterministic by user input
-                #stat_idx = input("Please enter a target station index:")
-                #stat_idx = int(stat_idx)
-                # random
-                stat_idx = self.np_rnd_gen.integers(0,3)
-                
-                # set agent decision
-                agent.set_decision(action=stat_idx)
-                
-                #pass
-            """
-            
-            
-            # stop simulation at this point
-            #self._env.main().activate()
-            
-            #   --> implement in agent class
-            #logger_dispatcher.debug(f"[DISPATCHER: {self}] Build feature vector for allocation agent {agent}")
-            # TEST ONLY: make tuple out of all stations
-            # all stations are available
-            # stations separately not necessary because agent already has information about associated target resources
-            #avail_stations = tuple(stations)
-            # LATER: generation in dedicated method to build feature vector
-        
-        logger_dispatcher.debug((f"[DISPATCHER: {self}] Available stations at {self.env.now()} ",
+        logger_dispatcher.debug((f"[DISPATCHER: {self}] Available stations at {self.env.now()} "
                                      f"are {avail_stations}"))
-        # apply different strategies to select a station out of the station group
-        match self._curr_alloc_rule:
-            case 'RANDOM':
-                # [RANDOM CHOICE]
-                target_station: ProcessingStation = random.choice(avail_stations)
-            case 'UTILISATION':
-                # [UTILISATION]
-                # choose the station with the lowest utilisation to time
-                target_station: ProcessingStation = min(avail_stations, key=attrgetter('stat_monitor.utilisation'))
-                logger_dispatcher.debug(f"[DISPATCHER: {self}] Utilisation of {target_station=} is {target_station.stat_monitor.utilisation:.4f}")
-            case 'WIP_LOAD_TIME':
-                # WIP as load/processing time, choose station with lowest WIP
-                target_station: ProcessingStation = min(avail_stations, key=attrgetter('stat_monitor.WIP_load_time'))
-                logger_dispatcher.debug(f"[DISPATCHER: {self}] WIP LOAD TIME of {target_station=} is {target_station.stat_monitor.WIP_load_time}")
-            case 'WIP_LOAD_JOBS':
-                # WIP as number of associated jobs, choose station with lowest WIP
-                target_station: ProcessingStation = min(avail_stations, key=attrgetter('stat_monitor.WIP_load_num_jobs'))
-                logger_dispatcher.debug(f"[DISPATCHER: {self}] WIP LOAD NUM JOBS of {target_station=} is {target_station.stat_monitor.WIP_load_time:.2f}")
-            
-        """case 'AGENT':
-            # request decision with previously built feature vector
-            # get index value for target station out of tuple
-            # [ONLY TEST] simulate agent decision by user input
-            # only if more than one station
-            
-            if len(avail_stations) > 1:
-                pprint(f"The available stations are:\n {avail_stations}")
-                #stat_idx = input("Please enter a target station index:")
-                #stat_idx = int(stat_idx)
-                stat_idx = agent.action
-                target_station = avail_stations[stat_idx]
-            else:
-                target_station = avail_stations[0]
-            
-            stat_idx = agent.action
-            target_station = avail_stations[stat_idx]
-        """
-        
-        if is_agent:
-            # get choosen station by tuple index (agent's action)
-            stat_idx = agent.action
-            target_station = avail_stations[stat_idx]
-            # check feasibility of the choosen target station
-            is_feasible = self._env.check_feasible_agent_alloc(
-                                            target_station=target_station,
-                                            op=op)
-            agent.action_feasible = is_feasible
-            logger_agents.debug(f"Action feasibility status: {is_feasible}")
         
         # [KPIs] reset all associated processing stations of that group to their original state
         infstruct_mgr.res_objs_temp_state(res_objs=stations, reset_temp=True)
@@ -2149,6 +2058,10 @@ class Dispatcher:
         
         return fig
 
+    def initialise(self) -> None:
+        # !! Placeholder, do nothing at the moment
+        ...
+
     def finalise(self) -> None:
         """
         method to be called at the end of the simulation run by 
@@ -2184,6 +2097,8 @@ class System(OrderedDict):
         # number of lower levels
         # how many levels of subsystems are possible
         self._abstraction_level = abstraction_level
+        # collection of all associated ProcessingStations
+        self._assoc_proc_stations: tuple[ProcessingStation, ...] = tuple()
         # indicator if the system contains processing stations
         self._containing_proc_stations: bool = False
         
@@ -2200,6 +2115,10 @@ class System(OrderedDict):
         # assignment
         self._alloc_agent: AllocationAgent | None = None
         
+    @property
+    def assoc_proc_stations(self) -> tuple[ProcessingStation, ...]:
+        return self._assoc_proc_stations
+    
     ### REWORK
     def register_agent(
         self,
@@ -2447,6 +2366,10 @@ class System(OrderedDict):
                                         key=attrgetter('system_id'), reverse=False)
         
         return tuple(low_lev_subsystems_lst)
+    
+    def initialise(self) -> None:
+        # assign associated ProcessingStations
+        self._assoc_proc_stations = self.lowest_level_subsystems(only_processing_stations=True)
 
 class ProductionArea(System):
     
@@ -2732,6 +2655,7 @@ class Monitor:
         """finalisation of stats gathering"""
         
         # assign state duration table
+        # !! REWORK with calc_KPI
         self.state_durations = self.state_durations_as_df()
         
         # calculate KPIs
@@ -3107,7 +3031,7 @@ class InfStructMonitor(Monitor):
         # [OCCUPATION]
         # properties which count as occupied
         # paused counts in because pausing the processing station is an external factor
-        util_props = ['PROCESSING', 'PAUSED']
+        util_props = ['PROCESSING', 'SETUP', 'PAUSED']
         self.time_occupied = self.state_durations.loc[util_props, 'abs [seconds]'].sum()
         
         # [UTILISATION]
@@ -3299,7 +3223,7 @@ class InfrastructureObject(System, sim.Component):
         
         self.cap = capacity
         
-        # [SALABIM COMPONENT] intialise base class
+        # [SALABIM COMPONENT] initialise base class
         process: str = 'main_logic'
         sim.Component.__init__(self, env=env, name=self._name, 
                                process=process, suppress_trace=True, **kwargs)
@@ -3407,7 +3331,6 @@ class InfrastructureObject(System, sim.Component):
         """
         # ALLOCATION REQUEST
         # TODO: check for changes in comments
-        # TODO: add dispatcher alloc evaluation
         ## call dispatcher --> request for allocation
         ## self._dispatcher.request_allocation ...
         ### input job
@@ -3421,14 +3344,52 @@ class InfrastructureObject(System, sim.Component):
         dispatcher = self.env.dispatcher
         infstruct_mgr = self.env.infstruct_mgr
         # call dispatcher to check for allocation rule
-        # if agent is set, do set flags and calculate feature vector
+        # resets current feasibility status
         yield self.hold(0)
-        is_agent = dispatcher.check_alloc_dispatch(job=job)
-        print(f'--------------- DEBUG: call before hold(0) at {self.env.t()}')
+        is_agent, alloc_agent = dispatcher.check_alloc_dispatch(job=job)
+            
+        if is_agent:
+            # if agent is set, set flags and calculate feature vector
+            # as long as there is no feasible action
+            while not alloc_agent.action_feasible:
+                # ** SET external Gym flag, build feature vector
+                dispatcher.request_agent_alloc(job=job)
+                # ** Break external loop
+                # ** [only step] Calc reward in Gym-Env
+                logger.debug(f'--------------- DEBUG: call before hold(0) at {self.env.t()}')
+                yield self.hold(0)
+                # ** make and set decision in Gym-Env --> RESET external Gym flag
+                logger.debug(f'--------------- DEBUG: call after hold(0) at {self.env.t()}')
+                logger_agents.debug((f"current {alloc_agent.action_feasible}, "
+                                 f"past {alloc_agent.past_action_feasible}"))
+                
+                # obtain target station, check for feasibility --> SET ``agent.action_feasible``
+                target_station = dispatcher.request_job_allocation(job=job, is_agent=is_agent)
+                # historic value for reward calculation, prevent overwrite from ``check_alloc_dispatch``
+                alloc_agent.past_action_feasible = alloc_agent.action_feasible
+        else:
+            # simply obtain target station if no agent decision is needed
+            target_station = dispatcher.request_job_allocation(job=job, is_agent=is_agent)
+                
+                
+        # should reset feasibility status, call only once
+        # now loop: while not agent.action_feasible
+        ### (if action not feasible step again through the decision making process)
+        # request decision --> SET FLAG FOR GYM LOOP
+        # self.hold(0)
+        # ** Calc Reward
+        # make and set decision in Gym-Env --> RESET FLAG
+        # ``request_job_allocation`` --> check feasibility
+        ### --> SET ``agent.action_feasible``
+        
+        # historic value for reward calculation
+        # agent.past_action_feasible = agent.action_feasible
+        
+        
         yield self.hold(0)
-        print(f'--------------- DEBUG: call after hold(0) at {self.env.t()}')
+        
         target_station = dispatcher.request_job_allocation(job=job, is_agent=is_agent)
-        #target_station = yield from dispatcher.request_job_allocation(job=job)
+        # feasibility is checked inside method
         
         ### UPDATE JOB PROCESS INFO IN REQUEST FUNCTION???
         
@@ -3577,7 +3538,7 @@ class InfrastructureObject(System, sim.Component):
     
     def main_logic(self) -> Generator[Any, None, None]:
         """main logic loop for all resources in the simulation environment"""
-        logger.debug(f"----> Process logic of {self}")
+        logger_infstrct.debug(f"----> Process logic of {self}")
         # pre control logic
         ret = self.pre_process()
         # main control logic
@@ -3952,6 +3913,8 @@ class Source(InfrastructureObject):
             candidates = stat_groups.loc[(stat_groups['prod_area_id'] == PA_sys_id), 'custom_id'].to_list()
             # map production area custom ID to the associated station group custom IDs
             stat_group_ids[PA_custom_id] = candidates
+            
+        logger_sources.debug(f"[SOURCE: {self}] Stat Group IDs: {stat_group_ids}")
         
         while True:
             
@@ -4002,6 +3965,7 @@ class Source(InfrastructureObject):
                       prio=prio,
                       planned_starting_date=start_date_init,
                       planned_ending_date=end_date_init)
+            logger_sources.debug(f"[SOURCE: {self}] Job target station group {job.operations[0].target_station_group}")
             # [Call:DISPATCHER]
             dispatcher.release_job(job=job)
             # [STATS:Source] count number of inputs (source: generation of jobs or entry in pipeline)
@@ -4169,7 +4133,7 @@ class Operation:
         # register operation instance
         current_state = self._stat_monitor.get_current_state()
         
-        # REWORK: only return OpID, other properties directly written by dispatcher method
+        # registration: only return OpID, other properties directly written by dispatcher method
         # add target station group by station group identifier
         self.name: str | None = None
         self.target_exec_system: System | None = None
@@ -4596,7 +4560,7 @@ class BaseComponent(sim.Component):
         
         # environment
         self.env = env
-        # [SALABIM COMPONENT] intialise base class
+        # [SALABIM COMPONENT] initialise base class
         process: str = 'main_logic'
         super().__init__(env=env, name=name, process=process,
                          suppress_trace=True, **kwargs)
@@ -4617,7 +4581,7 @@ class BaseComponent(sim.Component):
     
     def main_logic(self) -> Generator[Any, None, None]:
         """main logic loop for all resources in the simulation environment"""
-        logger.debug(f"----> Process logic of {self}")
+        logger_infstrct.debug(f"----> Process logic of {self}")
         # pre control logic
         ret = self.pre_process()
         # main control logic
@@ -4638,7 +4602,7 @@ class ConditionSetter(BaseComponent):
         env: SimulationEnvironment,
         **kwargs,
     ) -> None:
-        # intialise base class
+        # initialise base class
         super().__init__(env=env, **kwargs)
         
     def __str__(self) -> str:
@@ -4654,7 +4618,7 @@ class TransientCondition(ConditionSetter):
     ) -> None:
         # duration after which the condition is set
         self.duration_transient = duration_transient
-        # intialise base class
+        # initialise base class
         super().__init__(env=env, **kwargs)
     
     ### PROCESS LOGIC
@@ -4689,7 +4653,7 @@ class JobGenDurationCondition(ConditionSetter):
         sim_run_duration: Timedelta | None = None,
         **kwargs,
     ) -> None:
-        # intialise base class
+        # initialise base class
         super().__init__(env=env, **kwargs)
         
         # either point in time or duration must be provided
@@ -4756,7 +4720,7 @@ class TriggerAgentCondition(ConditionSetter):
         env: SimulationEnvironment,
         **kwargs,
     ) -> None:
-        # intialise base class
+        # initialise base class
         super().__init__(env=env, **kwargs)
     
     ### PROCESS LOGIC

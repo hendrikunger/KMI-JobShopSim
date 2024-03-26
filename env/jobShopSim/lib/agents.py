@@ -4,12 +4,19 @@ import numpy.typing as npt
 from typing import TYPE_CHECKING
 from datetime import timedelta as Timedelta
 import logging
+import statistics
 # TODO: remove later if not needed
 import random
 import sys
 
 if TYPE_CHECKING:
-    from .sim_env import SimulationEnvironment, System, Job
+    from .sim_env import (
+        SimulationEnvironment, 
+        System,
+        ProcessingStation,
+        Job, 
+        Operation
+    )
 
 logging.basicConfig(stream=sys.stdout)
 LOGGING_LEVEL_AGENTS = 'DEBUG'
@@ -95,9 +102,15 @@ class AllocationAgent(Agent):
         super().__init__(agent_type='ALLOC', **kwargs)
         
         # get associated systems
-        self._assoc_infstrct_objs = \
+        self._assoc_proc_stations = \
             self._assoc_system.lowest_level_subsystems(only_processing_stations=True)
             
+        # job-related porperties
+        self._current_job: Job | None = None
+        self._last_job: Job | None = None
+        self._current_op: Operation | None = None
+        self._last_op: Operation | None = None
+        
         # RL related properties
         self.feat_vec: npt.NDArray[np.float32] | None = None
         
@@ -109,8 +122,9 @@ class AllocationAgent(Agent):
         #self._RL_decision_request: bool = False
         # [ACTIONS]
         # action chosen by RL agent
-        self._action: 'Action' | None = None
+        self._action: int | None = None
         self.action_feasible: bool = False
+        self.past_action_feasible: bool = False
         """
         # sync state
         self._RL_decision_done_state: State = sim.State(f'sync_{self.name()}_done')
@@ -118,29 +132,38 @@ class AllocationAgent(Agent):
         """
         
     @property
-    def RL_decision_done(self) -> bool:
-        return self._RL_decision_done
+    def current_job(self) -> 'Job':
+        return self._current_job
     
     @property
-    def RL_decision_request(self) -> bool:
-        return self._RL_decision_request
+    def last_job(self) -> 'Job':
+        return self._last_job
     
     @property
-    def action(self) -> 'Action':
+    def current_op(self) -> 'Operation':
+        return self._current_op
+    
+    @property
+    def last_op(self) -> 'Operation':
+        return self._last_op
+    
+    @property
+    def action(self) -> int | None:
         return self._action
     
     @property
-    def assoc_infstrct_objs(self) -> tuple:
-        return self._assoc_infstrct_objs
+    def assoc_proc_stations(self) -> tuple[ProcessingStation, ...]:
+        return self._assoc_proc_stations
     
-    def update_assoc_infstrct_objs(self) -> None:
+    def update_assoc_proc_stations(self) -> None:
         # get associated systems
-        self._assoc_infstrct_objs = \
+        self._assoc_proc_stations = \
             self._assoc_system.lowest_level_subsystems(only_processing_stations=True)
             
     def request_decision(
         self,
-        disposable_job: 'Job',
+        job: 'Job',
+        op: 'Operation',
     ) -> None:
         # for each request, decision not done yet
         # indicator for internal loop
@@ -152,14 +175,22 @@ class AllocationAgent(Agent):
         # indicator that request is being made
         self.set_dispatching_signal(reset=False)
         
+        # remember relevant jobs
+        if job != self._current_job:
+            self._last_job = self._current_job
+            self._current_job = job
+        if op != self._current_op:
+            self._last_op = self._current_op
+            self._current_op = op
+        
         # build feature vector
-        self.feat_vec = self._build_feat_vec(disposable_job=disposable_job)
+        self.feat_vec = self._build_feat_vec(job=self._current_job)
         
         logger_agents.debug(f"[REQUEST Agent {self}]: built FeatVec.")
     
     def set_decision(
         self,
-        action: 'Action',
+        action: int | None,
     ) -> None:
         # get action from RL agent
         self._action = action
@@ -176,16 +207,16 @@ class AllocationAgent(Agent):
         
         logger_agents.debug(f"[DECISION SET Agent {self}]: Set {self._action=}")
     
-    # REWORK
+    # ?? REWORK necessary?
     def _build_feat_vec(
         self,
-        disposable_job: 'Job',
+        job: 'Job',
     ) -> 'FeatureVector':
         
         # resources
         # needed properties
         # station group, availability, WIP_time
-        for i, res in enumerate(self._assoc_infstrct_objs):
+        for i, res in enumerate(self._assoc_proc_stations):
             # T1 build feature vector for one machine
             monitor = res.stat_monitor
             # station group identifier should be the system's one 
@@ -208,8 +239,8 @@ class AllocationAgent(Agent):
         # job
         # needed properties
         # order time, target station group ID
-        order_time: float = disposable_job.current_order_time / Timedelta(hours=1)
-        job_SGI = disposable_job.current_op.target_station_group_identifier
+        order_time: float = job.current_order_time / Timedelta(hours=1)
+        job_SGI = job.current_op.target_station_group_identifier
         # SGI is type CustomID, but system ID (ObjectID) is needed
         # lookup system ID by custom ID in Infrastructure Manager
         infstruct_mgr = self.env.infstruct_mgr
@@ -236,7 +267,42 @@ class AllocationAgent(Agent):
         """
         Generate random action based on associated objects
         """
-        return random.randint(0, len(self._assoc_infstrct_objs)-1)
+        return random.randint(0, len(self._assoc_proc_stations)-1)
+    
+    def calc_reward(self) -> float:
+        # !! REWORK
+        # TODO change reward type hint
+        # punishment for non-feasible-action ``past_action_feasible``
+        reward: float = 0.
+        
+        if not self.past_action_feasible:
+            # non-feasible actions
+            reward = -10.
+        else:
+            # calc reward based on feasible action chosen
+            # utilisation, but based on target station group
+            # use last OP because current one already set
+            op_rew = self._last_op
+            
+            if op_rew is None:
+                # catch empty OPs
+                raise ValueError(("Tried to calculate reward based "
+                                 "on a non-existent operation"))
+            
+            # obtain relevant ProcessingStations contained in 
+            # the corresponding StationGroup
+            stations = op_rew.target_station_group.assoc_proc_stations
+            logger_agents.debug(f"++++++ {stations=}")
+            # calculate mean utilisation of all processing stations associated
+            # with the corresponding operation and agent's action
+            util_vals: list[float] = [ps.stat_monitor.utilisation for ps in stations]
+            logger_agents.debug(f"++++++ {util_vals=}")
+            util_mean = statistics.mean(util_vals)
+            logger_agents.debug(f"++++++ {util_mean=}")
+            
+            reward = 50.
+            
+        logger_agents.debug(f"+#+#+#+#+# {reward=}")
 
 class SequencingAgent(Agent):
     

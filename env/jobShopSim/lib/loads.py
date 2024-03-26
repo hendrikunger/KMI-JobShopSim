@@ -3,7 +3,7 @@ import numpy as np
 import numpy.typing as npt
 from numpy.random._generator import Generator as NPRandomGenerator
 import random
-from .utils import DTParser
+from .utils import DTManager
 
 class RandomJobGenerator:
     
@@ -15,7 +15,7 @@ class RandomJobGenerator:
         seed: seed value for random number generator
         """
         self._np_rnd_gen: NPRandomGenerator = np.random.default_rng(seed=seed)
-        self._dt_parser: DTParser = DTParser()
+        self._dt_mgr: DTManager = DTManager()
         random.seed(seed)
         
     def gen_rnd_JSSP_inst(
@@ -110,7 +110,7 @@ class RandomJobGenerator:
                                             dtype=np.uint16).tolist()
         for time in proc_times_time_unit:
             # build timedelta object
-            td = self._dt_parser.timedelta_from_val(val=time,
+            td = self._dt_mgr.timedelta_from_val(val=time,
                                                     time_unit=time_unit)
             proc_times.append(td)
         
@@ -126,7 +126,7 @@ class RandomJobGenerator:
                                                 dtype=np.uint16).tolist()
             for time in setup_times_time_unit:
                 # build timedelta object
-                td = self._dt_parser.timedelta_from_val(val=time,
+                td = self._dt_mgr.timedelta_from_val(val=time,
                                                         time_unit=time_unit)
                 # append object
                 setup_times.append(td)

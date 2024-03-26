@@ -109,7 +109,7 @@ class JSSEnv(gym.Env):
 
     metadata = {"render_modes": ["human"], "render_fps": 30}
 
-    def __init__(self, arg1, arg2, ...):
+    def __init__(self) -> None:
         super().__init__()
         
         # build env
@@ -122,8 +122,9 @@ class JSSEnv(gym.Env):
         # They must be gym.spaces objects
         # Example when using discrete actions:
         # number of discrete actions depends on layout and infrastructure
-        self.action_space = spaces.Discrete(n_actions)
+        self.action_space = spaces.Discrete(n=n_actions)
         # Example for using image as input (channel-first; channel-last also works):
+        # TODO change observation space
         self.observation_space = spaces.Box(low=0, high=255,
                                             shape=(N_CHANNELS, HEIGHT, WIDTH), dtype=np.uint8)
         
@@ -146,16 +147,21 @@ class JSSEnv(gym.Env):
         # ** Run till next action is needed
         # execute with provided action till next decision should be made
         while not agent.dispatching_signal:
+            
             # empty event list, simulation run ended
-            # theoretically should never be triggered unless transient condition
-            # is met later than configured simulation time
             if not self.env._event_list:
                 self.terminated = True
                 break
+            
             self.env.step()
         
         # ** Calculate Reward
         # in agent class, not implemented yet
+        # call from here
+
+        # additional info
+        truncated = {}
+        info = {}
         
         return observation, reward, self.terminated, truncated, info
 
@@ -180,6 +186,7 @@ class JSSEnv(gym.Env):
         
         # feature vector already built internally when dispatching signal is set
         
+        # additional info
         observation = self.agent.feat_vec
         info = {}
         
