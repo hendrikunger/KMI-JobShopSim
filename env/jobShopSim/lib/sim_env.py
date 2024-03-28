@@ -18,12 +18,13 @@ import numpy.typing as npt
 import pandas as pd
 from pandas import DataFrame, Series
 import plotly.express as px
-from plotly.graph_objs._figure import Figure
+from plotly.graph_objs._figure import Figure as PlotlyFigure
 from .utils import (flatten, DTManager, 
                     TIMEZONE_UTC, TIMEZONE_CEST, 
                     DEFAULT_DATETIME, adjust_db_dates_local_tz)
 from .agents import AllocationAgent, SequencingAgent
 from .errors import AssociationError, ViolateStartingCondition
+from . import dashboard
 
 # set Salabim to yield mode (using yield is mandatory)
 sim.yieldless(False)
@@ -32,7 +33,7 @@ sim.yieldless(False)
 SalabimEnv: TypeAlias = sim.Environment
 ObjectID: TypeAlias = int
 CustomID: TypeAlias = int | str
-PlotlyFigure: TypeAlias = Figure
+#PlotlyFigure: TypeAlias = Figure
 
 # constants
 # infinity
@@ -49,7 +50,7 @@ LOGGING_LEVEL = 'DEBUG'
 LOGGING_LEVEL_ENV = 'INFO'
 LOGGING_LEVEL_DISPATCHER = 'ERROR'
 LOGGING_LEVEL_INFSTRCT = 'INFO'
-LOGGING_LEVEL_SOURCES = 'DEBUG'
+LOGGING_LEVEL_SOURCES = 'ERROR'
 LOGGING_LEVEL_SINKS = 'ERROR'
 LOGGING_LEVEL_PRODSTATIONS = 'ERROR'
 LOGGING_LEVEL_JOBS = 'ERROR'
@@ -359,6 +360,13 @@ class SimulationEnvironment(sim.Environment):
         
         # dispatcher instance
         self._dispatcher.finalise()
+    
+    def dashboard_update(self) -> None:
+        # infrastructure manager instance
+        self._infstruct_mgr.dashboard_update()
+        
+        # dispatcher instance
+        self._dispatcher.dashboard_update()
 
 
 # ENVIRONMENT MANAGEMENT
@@ -868,6 +876,10 @@ class InfrastructureManager:
         for res_obj in self._res_db['resource']:
             res_obj.finalise()
         logger_infstrct.info("Successful finalisation of the state information for all resource objects.")
+    
+    def dashboard_update(self) -> None:
+        # !! Placeholder, not implemented yet
+        ...
 
 class Dispatcher:
     
@@ -1668,9 +1680,23 @@ class Dispatcher:
         target_exec_system = op.target_exec_system
         # agent available, get necessary information for decision
         agent = target_exec_system.alloc_agent
+        
+        # [KPI] calculate necessary KPIs by putting associated
+        # objects in TEMP state
+        self.env.infstruct_mgr.res_objs_temp_state(
+            res_objs=agent.assoc_proc_stations,
+            reset_temp=False,
+        )
+        
         # request decision from agent, sets internal flag
         agent.request_decision(job=job, op=op)
         logger_dispatcher.debug(f"[DISPATCHER: {self}] Alloc Agent: Decision request made.")
+        
+        # reset TEMP state
+        self.env.infstruct_mgr.res_objs_temp_state(
+            res_objs=agent.assoc_proc_stations,
+            reset_temp=True,
+        )
     
     def request_job_allocation(
         self,
@@ -1759,50 +1785,26 @@ class Dispatcher:
         #       --> other allocation rules: the chosen target station 
         #           automatically fulfils feasibility
         
+        # infrastructure manager
+        infstruct_mgr = self.env.infstruct_mgr
+        
         # obtain the lowest level systems (only ProcessingStations) of 
         # that area or station group
         # agent chooses from its associated objects
-        if target_station_group is not None and not is_agent:
-            # preselection of station group only with allocation rules other than >>AGENT<<
-            # returned ProcessingStations automatically feasible regarding thier StationGroup
-            stations = target_station_group.assoc_proc_stations
-            #stations = target_station_group.lowest_level_subsystems(only_processing_stations=True)
-        else:
-            # choose from whole production area
-            stations = exec_system.assoc_proc_stations
-            #stations = exec_system.lowest_level_subsystems(only_processing_stations=True)
+        if not is_agent:
+            if target_station_group:
+                # preselection of station group only with allocation rules other than >>AGENT<<
+                # returned ProcessingStations automatically feasible regarding thier StationGroup
+                stations = target_station_group.assoc_proc_stations
+            else:
+                # choose from whole production area
+                stations = exec_system.assoc_proc_stations
         
-        # infrastructure manager
-        infstruct_mgr = self.env.infstruct_mgr
-        # [KPIs] calculate necessary information for decision making
-        # put all associated processing stations of that group in 'TEMP' state
-        infstruct_mgr.res_objs_temp_state(res_objs=stations, reset_temp=False)
-        
-        # ?? CALC REWARD?
-        # Action t=t, Reward calc t=t+1 == R_t
-        # first action no reward calculation
-        # calculated reward at this point in time is result of previous action
-        
-        # available stations
-        ## AGENT can choose from all associated stations, not only available ones
-        ## availability of processing stations should be learned by the agent
-        ## using the utilisation as reward parameter
-        if is_agent:
-            # get agent from execution system
-            agent = exec_system.alloc_agent
-            # available stations are the associated ones
-            avail_stations = agent.assoc_proc_stations
-            # Feature vector already built when request done to agent
-            # request is being made and feature vector obtained
-            # get choosen station by tuple index (agent's action)
-            station_idx = agent.action
-            target_station = avail_stations[station_idx]
-            # check feasibility of the choosen target station
-            agent.action_feasible = self._env.check_feasible_agent_alloc(
-                                            target_station=target_station,
-                                            op=op)
-            logger_agents.debug(f"Action feasibility status: {agent.action_feasible}")
-        else:
+            # [KPIs] calculate necessary information for decision making
+            # put all associated processing stations of that group in 'TEMP' state
+            # >>AGENT<<: already done by calling
+            infstruct_mgr.res_objs_temp_state(res_objs=stations, reset_temp=False)
+            
             # choose only from available processing stations
             candidates: list[ProcessingStation] = [ps for ps in stations if ps.stat_monitor.is_available]
             # if there are no available ones: use all stations
@@ -1831,11 +1833,34 @@ class Dispatcher:
                     target_station: ProcessingStation = min(avail_stations, key=attrgetter('stat_monitor.WIP_load_num_jobs'))
                     logger_dispatcher.debug(f"[DISPATCHER: {self}] WIP LOAD NUM JOBS of {target_station=} is {target_station.stat_monitor.WIP_load_time:.2f}")
             
-        logger_dispatcher.debug((f"[DISPATCHER: {self}] Available stations at {self.env.now()} "
-                                     f"are {avail_stations}"))
-        
-        # [KPIs] reset all associated processing stations of that group to their original state
-        infstruct_mgr.res_objs_temp_state(res_objs=stations, reset_temp=True)
+            # [KPIs] reset all associated processing stations of that group to their original state
+            infstruct_mgr.res_objs_temp_state(res_objs=stations, reset_temp=True)
+            
+        else:
+            # ** AGENT decision
+            # available stations
+            ## agent can choose from all associated stations, not only available ones
+            ## availability of processing stations should be learned by the agent
+            ## using the utilisation as reward parameter
+            # get agent from execution system
+            agent = exec_system.alloc_agent
+            # available stations are the associated ones
+            avail_stations = agent.assoc_proc_stations
+            # Feature vector already built when request done to agent
+            # request is being made and feature vector obtained
+            # get chosen station by tuple index (agent's action)
+            station_idx = agent.action
+            target_station = avail_stations[station_idx]
+            # check feasibility of the chosen target station
+            agent.action_feasible = self._env.check_feasible_agent_alloc(
+                                            target_station=target_station,
+                                            op=op)
+            logger_agents.debug(f"Action feasibility status: {agent.action_feasible}")
+
+        # ?? CALC REWARD?
+        # Action t=t, Reward calc t=t+1 == R_t
+        # first action no reward calculation
+        # calculated reward at this point in time is result of previous action
         
         return target_station
     
@@ -1935,6 +1960,7 @@ class Dispatcher:
         save_img: bool = False,
         save_html: bool = False,
         file_name: str = 'gantt_chart',
+        debug: bool = False,
     ) -> PlotlyFigure:
         """
         draw a Gantt chart based on the dispatcher's operation database
@@ -1947,8 +1973,7 @@ class Dispatcher:
             between start and end; if there were no interruptions both methods return the same results \
             default: False
         """
-        # TODO: Implement date conversion to local time zone
-        # TODO: use copy of original data table with adapted dates
+        # TODO: Implement debug function to display results during sim runs
         
         # filter operation DB for relevant information
         filter_items: list[str] = [
@@ -1981,12 +2006,19 @@ class Dispatcher:
             'order_time': True,
         }
         # TODO: disable hover infos if some entries are None
+        
+        if debug:
+            self._job_db_date_adjusted = adjust_db_dates_local_tz(db=self._job_db)
+            self._op_db_date_adjusted = adjust_db_dates_local_tz(db=self._op_db)
+        
         #hover_template: str = "proc_time: %{proc_time|%d:%H:%M:%S}"
         if dates_to_local_tz:
             target_db = self._op_db_date_adjusted
         else:
             target_db = self._op_db
         
+        # filter only finished operations (for debug display)
+        target_db = target_db.loc[(target_db['state']=='FINISH'),:]
         
         df = target_db.filter(items=filter_items)
         # calculate delta time between start and end
@@ -2019,9 +2051,7 @@ class Dispatcher:
         # build Gantt chart with Plotly Timeline
         fig: PlotlyFigure = px.timeline(
             df, 
-            #x_start='entry_date',
             x_start='actual_starting_date',
-            #x_end='exit_date',
             x_end='actual_ending_date',
             y=proc_station_prop, 
             color=group_by_key,
@@ -2046,14 +2076,17 @@ class Dispatcher:
             d.x = df.loc[filt, 'delta']
         """
 
-        fig.show()
-        
+        if debug:
+            #fig.show(renderer='browser')
+            dashboard.write_gantt(gantt_updated=fig)
+        else:
+            fig.show()
         if save_html:
             file = f'{file_name}.html'
             fig.write_html(file)
         
         if save_img:
-            file = f'{file_name}.svg'
+            file = f'{file_name}'
             fig.write_image(file)
         
         return fig
@@ -2070,6 +2103,13 @@ class Dispatcher:
         self._calc_cycle_time()
         self._job_db_date_adjusted = adjust_db_dates_local_tz(db=self._job_db)
         self._op_db_date_adjusted = adjust_db_dates_local_tz(db=self._op_db)
+    
+    def dashboard_update(self) -> None:
+        # update gantt chart in dashboard
+        fig = self.draw_gantt_chart(
+            dates_to_local_tz=True,
+            debug=True,
+        )
 
 
 # SYSTEMS
@@ -3356,7 +3396,7 @@ class InfrastructureObject(System, sim.Component):
                 dispatcher.request_agent_alloc(job=job)
                 # ** Break external loop
                 # ** [only step] Calc reward in Gym-Env
-                logger.debug(f'--------------- DEBUG: call before hold(0) at {self.env.t()}')
+                logger.debug(f'--------------- DEBUG: call before hold(0) at {self.env.t()}, {self.env.t_as_dt()}')
                 yield self.hold(0)
                 # ** make and set decision in Gym-Env --> RESET external Gym flag
                 logger.debug(f'--------------- DEBUG: call after hold(0) at {self.env.t()}')
@@ -3955,8 +3995,8 @@ class Source(InfrastructureObject):
             #start_date_init = [Datetime(2023, 11, 20, hour=6), Datetime(2023, 11, 21, hour=2)]
             #end_date_init = [Datetime(2023, 12, 1, hour=10), Datetime(2023, 12, 2, hour=2)]
             
-            logger_sources.debug(f"{job_ex_order=}")
-            logger_sources.debug(f"{job_target_station_groups=}")
+            logger_sources.debug(f"[SOURCE: {self}] {job_ex_order=}")
+            logger_sources.debug(f"[SOURCE: {self}] {job_target_station_groups=}")
             job = Job(dispatcher=dispatcher,
                       exec_systems_order=job_ex_order,
                       target_stations_order=job_target_station_groups,

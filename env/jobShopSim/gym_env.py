@@ -163,12 +163,20 @@ class JSSEnv(gym.Env):
         truncated = {}
         info = {}
         
+        # finalise simulation environment
+        if self.terminated:
+            self.sim_env.finalise()
+        
         return observation, reward, self.terminated, truncated, info
 
     def reset(self, seed=None, options=None):
         # re-init simulation environment
         (self.sim_env, self.infstruct_mgr, 
          self.dispatcher, self.agent) = build_sim_env()
+        # evaluate if all needed components are registered
+        self.sim_env.check_integrity()
+        # initialise simulation environment
+        self.sim_env.initialise()
         
         # run till first decision should be made
         # transient condition implemented --> triggers a point in time

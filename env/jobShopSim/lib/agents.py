@@ -222,13 +222,13 @@ class AllocationAgent(Agent):
             # station group identifier should be the system's one 
             # because custom IDs can be non-numeric which is bad for an agent
             # use only first identifier although multiple values are possible
-            res_SGI: ObjectID = list(res.supersystems_ids)[0]
+            res_sys_SGI: ObjectID = list(res.supersystems_ids)[0]
             # availability: boolean to integer
             avail = int(monitor.is_available)
             # WIP_time in hours
             WIP_time: float = monitor.WIP_load_time / Timedelta(hours=1)
             
-            temp1: tuple[ObjectID, int, float] = (res_SGI, avail, WIP_time)
+            temp1: tuple[ObjectID, int, float] = (res_sys_SGI, avail, WIP_time)
             temp2 = np.array(temp1)
             
             if i == 0:
@@ -248,7 +248,7 @@ class AllocationAgent(Agent):
             subsystem_type='StationGroup',
             custom_ID=job_SGI,
         )
-        temp1: tuple[float, ObjectID] = (order_time, system_id)
+        temp1: tuple[float, ObjectID] = (system_id, order_time)
         temp2 = np.array(temp1)
         
         # concat job information
@@ -277,7 +277,7 @@ class AllocationAgent(Agent):
         
         if not self.past_action_feasible:
             # non-feasible actions
-            reward = -10.
+            reward = -100.
         else:
             # calc reward based on feasible action chosen
             # utilisation, but based on target station group
@@ -300,9 +300,12 @@ class AllocationAgent(Agent):
             util_mean = statistics.mean(util_vals)
             logger_agents.debug(f"++++++ {util_mean=}")
             
-            reward = 50.
+            reward = (util_mean - 1.)
             
+        
         logger_agents.debug(f"+#+#+#+#+# {reward=}")
+        
+        return reward
 
 class SequencingAgent(Agent):
     
