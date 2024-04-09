@@ -8,6 +8,8 @@ from operator import attrgetter
 from functools import lru_cache
 from pprint import pprint
 import logging
+import asyncio
+#import websockets
 import sys
 import random
 import datetime
@@ -19,12 +21,19 @@ import pandas as pd
 from pandas import DataFrame, Series
 import plotly.express as px
 from plotly.graph_objs._figure import Figure as PlotlyFigure
+import plotly.io
 from .utils import (flatten, DTManager, 
                     TIMEZONE_UTC, TIMEZONE_CEST, 
                     DEFAULT_DATETIME, adjust_db_dates_local_tz)
 from .agents import AllocationAgent, SequencingAgent
 from .errors import AssociationError, ViolateStartingCondition
-from . import dashboard
+#from .dashboard import dashboard
+
+#from .dashboard.websocket import update_gantt_chart
+from websocket import create_connection
+from .dashboard.dashboard import URL, WS_URL, start_dashboard
+from .dashboard.websocket_server import start_websocket_server
+import multiprocessing as mp
 
 # set Salabim to yield mode (using yield is mandatory)
 sim.yieldless(False)
@@ -120,6 +129,7 @@ class SimulationEnvironment(sim.Environment):
         self,
         time_unit: str = 'seconds',
         starting_datetime: Datetime | None = None,
+        debug_dashboard: bool = False,
         **kwargs,
     ) -> None:
         """
@@ -152,10 +162,12 @@ class SimulationEnvironment(sim.Environment):
         self.is_transient_cond: bool = True
         self.transient_cond_state: State = sim.State('trans_cond', env=self)
         
-        # !! remove later, signals now in agent class
-        # [DECISION FLAGS]
-        #self._signal_allocation: bool = False
-        #self._signal_sequencing: bool = False
+        # ** debug dashboard
+        self.debug_dashboard = debug_dashboard
+        self.servers_connected: bool = False
+        if self.debug_dashboard:
+            self.ws_server_process = mp.Process(target=start_websocket_server)
+            self.dashboard_server_process = mp.Process(target=start_dashboard)
     
     def t_as_dt(self) -> Datetime:
         """return current simulation time as Datetime object
@@ -348,6 +360,20 @@ class SimulationEnvironment(sim.Environment):
         # dispatcher instance
         self._dispatcher.initialise()
         
+        # establish websocket connection
+        if self.debug_dashboard and not self.servers_connected:
+            # start websocket server
+            logger_env.info("Starting websocket server...")
+            self.ws_server_process.start()
+            # start dashboard server
+            logger_env.info("Starting dashboard server...")
+            self.dashboard_server_process.start()
+            # establish websocket connection used for streaming of updates
+            logger_env.info("Establish websocket connection...")
+            self.ws_con = create_connection(WS_URL)
+            # set internal flag indicating that servers are started
+            self.servers_connected = True
+        
         logger_env.info(f"Initialisation for Environment {self.name()} successful.")
     
     def finalise(self) -> None:
@@ -360,6 +386,20 @@ class SimulationEnvironment(sim.Environment):
         
         # dispatcher instance
         self._dispatcher.finalise()
+        
+        # close WS connection
+        if self.debug_dashboard and self.servers_connected:
+            # close websocket connection
+            logger_env.info("Closing websocket connection...")
+            self.ws_con.close()
+            # stop websocket server
+            logger_env.info("Shutting down websocket server...")
+            self.ws_server_process.terminate()
+            # stop dashboard server
+            logger_env.info("Shutting down dasboard server...")
+            self.dashboard_server_process.terminate()
+            # reset internal flag indicating that servers are started
+            self.servers_connected = False
     
     def dashboard_update(self) -> None:
         # infrastructure manager instance
@@ -447,7 +487,7 @@ class InfrastructureManager:
         # currently only one sink out of the pool is chosen because jobs do not contain 
         # information about a target sink
         self._sink_registered: bool = False
-        self._sinks: list[Sink] = list()
+        self._sinks: list[Sink] = []
         
         # counter for processing stations (machines, assembly, etc.)
         self.num_proc_stations: int = 0
@@ -1960,7 +2000,6 @@ class Dispatcher:
         save_img: bool = False,
         save_html: bool = False,
         file_name: str = 'gantt_chart',
-        debug: bool = False,
     ) -> PlotlyFigure:
         """
         draw a Gantt chart based on the dispatcher's operation database
@@ -2007,7 +2046,7 @@ class Dispatcher:
         }
         # TODO: disable hover infos if some entries are None
         
-        if debug:
+        if self._env.debug_dashboard:
             self._job_db_date_adjusted = adjust_db_dates_local_tz(db=self._job_db)
             self._op_db_date_adjusted = adjust_db_dates_local_tz(db=self._op_db)
         
@@ -2076,9 +2115,12 @@ class Dispatcher:
             d.x = df.loc[filt, 'delta']
         """
 
-        if debug:
+        if self._env.debug_dashboard:
             #fig.show(renderer='browser')
-            dashboard.write_gantt(gantt_updated=fig)
+            # TODO write to websocket
+            fig_json = plotly.io.to_json(fig=fig)
+            # send by websocket
+            self._env.ws_con.send(fig_json)
         else:
             fig.show()
         if save_html:
@@ -2108,7 +2150,6 @@ class Dispatcher:
         # update gantt chart in dashboard
         fig = self.draw_gantt_chart(
             dates_to_local_tz=True,
-            debug=True,
         )
 
 
@@ -2131,14 +2172,14 @@ class System(OrderedDict):
         # subsystem information
         self._subsystem_type: str = subsystem_type
         # supersystem information
-        self._supersystems: OrderedDict[ObjectID, System] = dict()
+        self._supersystems: dict[ObjectID, System] = {}
         self._supersystems_ids: set[ObjectID] = set()
         self._supersystems_custom_ids: set[CustomID] = set()
         # number of lower levels
         # how many levels of subsystems are possible
         self._abstraction_level = abstraction_level
         # collection of all associated ProcessingStations
-        self._assoc_proc_stations: tuple[ProcessingStation, ...] = tuple()
+        self._assoc_proc_stations: tuple[ProcessingStation, ...] = ()
         # indicator if the system contains processing stations
         self._containing_proc_stations: bool = False
         
@@ -2382,7 +2423,7 @@ class System(OrderedDict):
         subsystems = self.as_list()
         
         while remaining_abstraction_level > 0:
-            temp: list[System] = list()
+            temp: list[System] = []
             
             for subsystem in subsystems:
                 children = subsystem.as_list()
@@ -2534,10 +2575,10 @@ class Monitor:
             raise ValueError(f"The state {state} is not allowed. Must be one of {self.states_possible}")
         
         # boolean indicator if a state is set
-        self.state_status: dict[str, bool] = dict()
+        self.state_status: dict[str, bool] = {}
         # time counter for each state
-        #self.state_times: dict[str, float] = dict()
-        self.state_times: dict[str, Timedelta] = dict()
+        #self.state_times: dict[str, float] = {}
+        self.state_times: dict[str, Timedelta] = {}
         # starting time variable indicating when the last state assignment took place
         #self.state_starting_time: float = self._env.t()
         self.state_starting_time: Datetime = self._env.t_as_dt()
@@ -3947,7 +3988,7 @@ class Source(InfrastructureObject):
         # get station group custom identifiers which are associated with 
         # the relevant production areas
         stat_groups = infstruct_mgr.station_group_db.copy()
-        stat_group_ids: dict[CustomID, list[CustomID]] = dict()
+        stat_group_ids: dict[CustomID, list[CustomID]] = {}
         for PA_sys_id, PA_custom_id in prod_area_custom_ids.items():
             # get associated station group custom IDs by their corresponding production area system ID
             candidates = stat_groups.loc[(stat_groups['prod_area_id'] == PA_sys_id), 'custom_id'].to_list()

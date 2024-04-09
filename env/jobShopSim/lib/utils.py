@@ -32,7 +32,7 @@ def flatten(
     Generator[Any, None, None]
         non-nested list or tuple
     """
-    #
+    
     for x in lst_tpl:
         # only flatten lists and tuples
         if isinstance(x, (list, tuple)):
@@ -255,7 +255,7 @@ def get_date_cols_from_db(
     db: DataFrame,
 ) -> list[str]:
     
-    target_cols: list[str] = list()
+    target_cols: list[str] = []
     
     for col in db.columns:
         if 'date' in col and 'deviation' not in col:

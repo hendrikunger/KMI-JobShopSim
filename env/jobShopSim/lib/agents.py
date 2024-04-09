@@ -227,7 +227,8 @@ class AllocationAgent(Agent):
             avail = int(monitor.is_available)
             # WIP_time in hours
             WIP_time: float = monitor.WIP_load_time / Timedelta(hours=1)
-            
+            # tuple: (System SGI of resource obj, availability status, 
+            # WIP calculated in time units)
             temp1: tuple[ObjectID, int, float] = (res_sys_SGI, avail, WIP_time)
             temp2 = np.array(temp1)
             
@@ -253,13 +254,6 @@ class AllocationAgent(Agent):
         
         # concat job information
         arr = np.concatenate((arr, temp2))
-        
-        
-        #self.feat_vec = arr
-        
-        # REWORK: simulate agent decision making in Gym Env
-        #time.sleep(7)
-        #self._RL_decision_done = True
         
         return arr
     

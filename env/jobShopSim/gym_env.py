@@ -7,6 +7,7 @@ from lib import loads
 from lib.utils import (DTParser, current_time_tz, 
                        dt_to_timezone, adjust_db_dates_local_tz)
 from lib import agents
+from lib.dashboard import app
 import datetime
 
 def build_sim_env() -> tuple[
@@ -193,11 +194,9 @@ class JSSEnv(gym.Env):
             self.env.step()
         
         # feature vector already built internally when dispatching signal is set
-        
-        # additional info
         observation = self.agent.feat_vec
+        # ?? leave additional info empty?
         info = {}
-        
         
         return observation, info
 
