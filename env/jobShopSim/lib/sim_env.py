@@ -1,46 +1,44 @@
+# typing and data structures
 from __future__ import annotations
 import salabim as sim
 from salabim import Queue, State
 from typing import TypeAlias, Self, Any
 from collections import OrderedDict, deque
-from collections.abc import Iterable, Sequence, Generator
-from operator import attrgetter
-from functools import lru_cache
-from pprint import pprint
-import logging
-import asyncio
-#import websockets
+from collections.abc import Iterable, Sequence, Generator, Iterator
+from pandas import DataFrame, Series
+# packages: standard library
 import sys
+import logging
 import random
-import datetime
 from datetime import datetime as Datetime
 from datetime import timedelta as Timedelta
+from operator import attrgetter
+from functools import lru_cache
+import multiprocessing as mp
+# packages: external
 import numpy as np
-import numpy.typing as npt
 import pandas as pd
-from pandas import DataFrame, Series
 import plotly.express as px
 from plotly.graph_objs._figure import Figure as PlotlyFigure
 import plotly.io
+from websocket import create_connection
+# packages: internal
+from .loads import OrderTime, ProductionSequence
 from .utils import (flatten, DTManager, 
                     TIMEZONE_UTC, TIMEZONE_CEST, 
                     DEFAULT_DATETIME, adjust_db_dates_local_tz)
 from .agents import AllocationAgent, SequencingAgent
 from .errors import AssociationError, ViolateStartingCondition
-#from .dashboard import dashboard
-
-#from .dashboard.websocket import update_gantt_chart
-from websocket import create_connection
 from .dashboard.dashboard import URL, WS_URL, start_dashboard
 from .dashboard.websocket_server import start_websocket_server
-import multiprocessing as mp
+
 
 # set Salabim to yield mode (using yield is mandatory)
 sim.yieldless(False)
 
 # type aliases
 SalabimEnv: TypeAlias = sim.Environment
-ObjectID: TypeAlias = int
+SystemID: TypeAlias = int
 CustomID: TypeAlias = int | str
 #PlotlyFigure: TypeAlias = Figure
 
@@ -217,8 +215,8 @@ class SimulationEnvironment(sim.Environment):
         elif not isinstance(infstruct_mgr, InfrastructureManager):
             raise TypeError(f"The object must be of type >>InfrastructureManager<< but is type >>{type(infstruct_mgr)}<<")
         else:
-            raise AttributeError("There is already a registered Infrastructure Manager instance \
-                                 Only one instance per environement is allowed.")
+            raise AttributeError(("There is already a registered Infrastructure Manager instance "
+                                 "Only one instance per environement is allowed."))
     
     def register_dispatcher(
         self,
@@ -235,8 +233,8 @@ class SimulationEnvironment(sim.Environment):
         elif not isinstance(dispatcher, Dispatcher):
             raise TypeError(f"The object must be of type >>Dispatcher<< but is type >>{type(dispatcher)}<<")
         else:
-            raise AttributeError("There is already a registered Dispatcher instance \
-                                 Only one instance per environment is allowed.")
+            raise AttributeError(("There is already a registered Dispatcher instance "
+                                 "Only one instance per environment is allowed."))
     
     # [DISPATCHING SIGNALS]
     @property
@@ -445,7 +443,7 @@ class InfrastructureManager:
         self._prod_area_db = self._prod_area_db.set_index('prod_area_id')
         self._prod_area_lookup_props: set[str] = set(['prod_area_id', 'custom_id', 'name'])
         # [PRODUCTION AREAS] identifiers
-        self._prod_area_counter: ObjectID = 0
+        self._prod_area_counter: SystemID = 0
         self._prod_area_custom_identifiers: set[CustomID] = set()
         
         # [STATION GROUPS] database as simple Pandas DataFrame
@@ -462,7 +460,7 @@ class InfrastructureManager:
         self._station_group_db = self._station_group_db.set_index('station_group_id')
         self._station_group_lookup_props: set[str] = set(['station_group_id', 'custom_id', 'name'])
         # [STATION GROUPS] identifiers
-        self._station_group_counter: ObjectID = 0
+        self._station_group_counter: SystemID = 0
         self._station_groups_custom_identifiers: set[CustomID] = set()
         
         # [RESOURCES] database as simple Pandas DataFrame
@@ -480,7 +478,7 @@ class InfrastructureManager:
         self._res_db = self._res_db.set_index('res_id')
         self._res_lookup_props: set[str] = set(['res_id', 'custom_id', 'name'])
         # [RESOURCES] custom identifiers
-        self._res_counter: ObjectID = 0
+        self._res_counter: SystemID = 0
         self._res_custom_identifiers: set[CustomID] = set()
         # [RESOURCES] sink: pool of sinks possible to allow multiple sinks in one environment
         # [PERHAPS CHANGED LATER] 
@@ -547,12 +545,12 @@ class InfrastructureManager:
     def _obtain_system_id(
         self,
         subsystem_type: str,
-    ) -> ObjectID:
+    ) -> SystemID:
         """Simple counter function for managing system IDs
 
         Returns
         -------
-        ObjectID
+        SystemID
             unique system ID
         """
         if subsystem_type not in self._subsystem_types:
@@ -578,7 +576,7 @@ class InfrastructureManager:
         custom_identifier: CustomID,
         name: str | None,
         state: str | None = None,
-    ) ->  tuple[ObjectID, str]:
+    ) ->  tuple[SystemID, str]:
         """
         registers an infrastructure object in the environment by assigning an unique id and 
         adding the object to the associated resources of the environment
@@ -588,7 +586,7 @@ class InfrastructureManager:
         name: custom name of the object, \
             default: None
         returns:
-            ObjectID: assigned resource ID
+            SystemID: assigned resource ID
             str: assigned resource's name
         """
         if subsystem_type not in self._subsystem_types:
@@ -615,8 +613,8 @@ class InfrastructureManager:
         
         # check if value already exists
         if check_val in custom_identifiers:
-            raise ValueError(f"The custom identifier {custom_identifier} provided for subsystem type {subsystem_type} \
-                already exists, but has to be unique.")
+            raise ValueError((f"The custom identifier {custom_identifier} provided for subsystem type {subsystem_type} "
+                            "already exists, but has to be unique."))
         else:
             custom_identifiers.add(check_val)
         
@@ -729,10 +727,10 @@ class InfrastructureManager:
     def lookup_subsystem_info(
         self,
         subsystem_type: str,
-        lookup_val: CustomID,
+        lookup_val: SystemID | CustomID,
         lookup_property: str | None = None,
         target_property: str | None = None,
-    ) -> tuple[Any, Series | None]:
+    ) -> Any:
         """
         obtain a subsystem by its property and corresponding value
         properties: Subsystem ID, Custom ID, Name
@@ -787,33 +785,33 @@ class InfrastructureManager:
                 temp1: Any = lookup_db.at[lookup_val, target_property]
                 return temp1
             except KeyError:
-                raise IndexError(f"There were no subsystems found for the lookup property >>{lookup_property}<< \
-                                with the value >>{lookup_val}<<")
+                raise IndexError((f"There were no subsystems found for the lookup property >>{lookup_property}<< "
+                                f"with the value >>{lookup_val}<<"))
         else:
             try:
                 temp1: Series = lookup_db.loc[lookup_db[lookup_property] == lookup_val, target_property]
                 # check for empty search result, at least one result necessary
                 if len(temp1) == 0:
-                    raise IndexError(f"There were no subsystems found for the lookup property >>{lookup_property}<< \
-                                    with the value >>{lookup_val}<<")
+                    raise IndexError((f"There were no subsystems found for the lookup property >>{lookup_property}<< "
+                                    f"with the value >>{lookup_val}<<"))
             except KeyError:
-                raise IndexError(f"There were no subsystems found for the lookup property >>{lookup_property}<< \
-                                with the value >>{lookup_val}<<")
+                raise IndexError((f"There were no subsystems found for the lookup property >>{lookup_property}<< "
+                                f"with the value >>{lookup_val}<<"))
             # check for multiple entries with same prop-value pair
             ########### PERHAPS CHANGE NECESSARY
             ### multiple entries but only one returned --> prone to errors
             if len(temp1) > 1:
                 # warn user
-                logger_infstrct.warning(f"CAUTION: There are multiple subsystems which share the \
-                            same value >>{lookup_val}<< for the lookup property >>{lookup_property}<<. \
-                            Only the first entry is returned.")
+                logger_infstrct.warning(("CAUTION: There are multiple subsystems which share the "
+                            f"same value >>{lookup_val}<< for the lookup property >>{lookup_property}<<. "
+                            "Only the first entry is returned."))
         
             return temp1.iat[0]
     
     def lookup_custom_ID(
         self,
         subsystem_type: str,
-        system_ID: ObjectID,
+        system_ID: SystemID,
     ) -> CustomID:
         
         match subsystem_type:
@@ -837,7 +835,7 @@ class InfrastructureManager:
         self,
         subsystem_type: str,
         custom_ID: CustomID,
-    ) -> ObjectID:
+    ) -> SystemID:
         
         system = self.lookup_subsystem_info(
             subsystem_type=subsystem_type,
@@ -1053,8 +1051,8 @@ class Dispatcher:
         ####################################
         # managing IDs
         self._id_types = set(['job', 'op'])
-        self._job_id_counter: ObjectID = 0
-        self._op_id_counter: ObjectID = 0
+        self._job_id_counter: SystemID = 0
+        self._op_id_counter: SystemID = 0
         
         # priority rules
         self._priority_rules: set[str] = set([
@@ -1138,7 +1136,7 @@ class Dispatcher:
     def _obtain_load_obj_id(
         self,
         load_type: str,
-    ) -> ObjectID:
+    ) -> SystemID:
         """Simple counter function for managing operation IDs"""
         # assign id and set counter up
         
@@ -1172,7 +1170,7 @@ class Dispatcher:
         custom_identifier: CustomID | None,
         name: str | None,
         state: str,
-    ) -> tuple[SimulationEnvironment, ObjectID, str]:
+    ) -> tuple[SimulationEnvironment, SystemID, str]:
         """
         registers an job object in the dispatcher instance by assigning an unique id and 
         adding the object to the associated jobs
@@ -1399,7 +1397,7 @@ class Dispatcher:
         custom_identifier: CustomID | None,
         name: str | None,
         state: str,
-    ) -> ObjectID:
+    ) -> SystemID:
         """
         registers an operation object in the dispatcher instance by assigning an unique id and 
         adding the object to the associated operations
@@ -1430,13 +1428,12 @@ class Dispatcher:
             name = f'O_gen_{op_id}'
             
         # setup time
-        setup_time: float = 0.
+        setup_time: Timedelta = Timedelta()
         if obj.setup_time is not None:
             setup_time = obj.setup_time
         
         # corresponding execution system in which the operation is performed
         # no pre-determined assignment of processing stations
-        global EXEC_SYSTEM_TYPE
         exec_system = infstruct_mgr.lookup_subsystem_info(
                                                     subsystem_type=EXEC_SYSTEM_TYPE,
                                                     lookup_property='custom_id',
@@ -1644,7 +1641,7 @@ class Dispatcher:
     #@lru_cache(maxsize=200)
     def get_job_obj_by_prop(
         self, 
-        val: ObjectID | CustomID | str,
+        val: SystemID | CustomID | str,
         property: str = 'job_id',
         target_prop: str = 'job',
     ) -> Job:
@@ -2172,14 +2169,15 @@ class System(OrderedDict):
         # subsystem information
         self._subsystem_type: str = subsystem_type
         # supersystem information
-        self._supersystems: dict[ObjectID, System] = {}
-        self._supersystems_ids: set[ObjectID] = set()
+        self._supersystems: dict[SystemID, System] = {}
+        self._supersystems_ids: set[SystemID] = set()
         self._supersystems_custom_ids: set[CustomID] = set()
         # number of lower levels
         # how many levels of subsystems are possible
         self._abstraction_level = abstraction_level
         # collection of all associated ProcessingStations
         self._assoc_proc_stations: tuple[ProcessingStation, ...] = ()
+        self._num_assoc_proc_stations: int = 0
         # indicator if the system contains processing stations
         self._containing_proc_stations: bool = False
         
@@ -2199,6 +2197,10 @@ class System(OrderedDict):
     @property
     def assoc_proc_stations(self) -> tuple[ProcessingStation, ...]:
         return self._assoc_proc_stations
+    
+    @property
+    def num_assoc_proc_station(self) -> int:
+        return self._num_assoc_proc_stations
     
     ### REWORK
     def register_agent(
@@ -2223,8 +2225,8 @@ class System(OrderedDict):
                 elif not isinstance(agent, AllocationAgent):
                     raise TypeError(f"The object must be of type >>AllocationAgent<< but is type >>{type(agent)}<<")
                 else:
-                    raise AttributeError("There is already a registered AllocationAgent instance \
-                                        Only one instance per system is allowed.")
+                    raise AttributeError(("There is already a registered AllocationAgent instance "
+                                        "Only one instance per system is allowed."))
             case 'SEQ':
                 raise NotImplementedError(f"Registration of sequencing agents not supported yet!")
             
@@ -2252,8 +2254,8 @@ class System(OrderedDict):
         elif not isinstance(alloc_agent, AllocationAgent):
             raise TypeError(f"The object must be of type >>AllocationAgent<< but is type >>{type(alloc_agent)}<<")
         else:
-            raise AttributeError("There is already a registered AllocationAgent instance \
-                                 Only one instance per system is allowed.")
+            raise AttributeError(("There is already a registered AllocationAgent instance "
+                                 "Only one instance per system is allowed."))
     
     def check_alloc_agent(self) -> bool:
         """checks if an allocation agent is registered for the system
@@ -2269,7 +2271,7 @@ class System(OrderedDict):
     def __repr__(self) -> str:
         return f'System (type: {self._subsystem_type}, custom_id: {self._custom_identifier}, name: {self._name})'
     
-    def __key(self) -> tuple[ObjectID, str]:
+    def __key(self) -> tuple[SystemID, str]:
         return (self._system_id, self._subsystem_type)
     
     def __hash__(self) -> int:
@@ -2280,7 +2282,7 @@ class System(OrderedDict):
         return self._subsystem_type
     
     @property
-    def system_id(self) -> ObjectID:
+    def system_id(self) -> SystemID:
         return self._system_id
     
     @property
@@ -2310,11 +2312,11 @@ class System(OrderedDict):
         self._containing_proc_stations = val
     
     @property
-    def supersystems(self) -> OrderedDict[ObjectID, System]:
+    def supersystems(self) -> OrderedDict[SystemID, System]:
         return self._supersystems
     
     @property
-    def supersystems_ids(self) -> set[ObjectID]:
+    def supersystems_ids(self) -> set[SystemID]:
         return self._supersystems_ids
     
     @property
@@ -2368,14 +2370,13 @@ class System(OrderedDict):
         """
         # do not allow adding of subsystems for lowest level systems
         if self._abstraction_level == 0:
-            raise RuntimeError(f"Tried to add subsystem to {self}, but it is \
-                on the lowest hierarchy level. Systems on the lowest level can not contain other systems.")
+            raise RuntimeError((f"Tried to add subsystem to {self}, but it is on the lowest hierarchy "
+                                "level. Systems on the lowest level can not contain other systems."))
         
         if subsystem.system_id not in self:
             self[subsystem.system_id] = subsystem
         else:
-            raise UserWarning(f"Subsystem {subsystem} was already \
-                in supersystem {self}!")
+            raise UserWarning(f"Subsystem {subsystem} was already in supersystem {self}!")
         
         subsystem.add_supersystem(supersystem=self)
         
@@ -2449,8 +2450,9 @@ class System(OrderedDict):
         return tuple(low_lev_subsystems_lst)
     
     def initialise(self) -> None:
-        # assign associated ProcessingStations
+        # assign associated ProcessingStations and corresponding info
         self._assoc_proc_stations = self.lowest_level_subsystems(only_processing_stations=True)
+        self._num_assoc_proc_stations = len(self._assoc_proc_stations)
 
 class ProductionArea(System):
     
@@ -2482,8 +2484,8 @@ class ProductionArea(System):
         """
         # type check: only certain subsystems are allowed for each supersystem
         if not isinstance(subsystem, StationGroup):
-            raise TypeError(f"The provided subsystem muste be of type >>StationGroup<<, \
-                but it is {type(subsystem)}.")
+            raise TypeError(("The provided subsystem muste be of type >>StationGroup<<, "
+                             f"but it is {type(subsystem)}."))
             
         super().add_subsystem(subsystem=subsystem)
 
@@ -2519,9 +2521,9 @@ class StationGroup(System):
         """
         # type check: only certain subsystems are allowed for each supersystem
         if not isinstance(subsystem, InfrastructureObject):
-            raise TypeError(f"The provided subsystem muste be of type >>InfrastructureObject<<, \
-                but it is {type(subsystem)}.")
-            
+            raise TypeError(("The provided subsystem muste be of type >>InfrastructureObject<<, ")
+                             (f"but it is {type(subsystem)}."))
+        
         super().add_subsystem(subsystem=subsystem)
 
 
@@ -2692,8 +2694,8 @@ class Monitor:
         """
         # check if object was in TEMP state, raise error if not
         if not self._is_temp:
-            raise RuntimeError(f"Tried to reset {self._target_object} from 'TEMP' state but \
-                the current state is >>{self.state_current}<<")
+            raise RuntimeError((f"Tried to reset {self._target_object} from 'TEMP' state but "
+                                f"the current state is >>{self.state_current}<<"))
         else:
             self._is_temp = False
             self.set_state(state=self._state_before_temp)
@@ -3315,7 +3317,7 @@ class InfrastructureObject(System, sim.Component):
         self.logic_queue: Queue = sim.Queue(name=queue_name, env=self.env)
         
         # currently available jobs on that resource
-        self.contents: OrderedDict[ObjectID, Job] = OrderedDict()
+        self.contents: OrderedDict[SystemID, Job] = OrderedDict()
         
         # [STATS] additional information
         # number of inputs/outputs
@@ -3359,8 +3361,8 @@ class InfrastructureObject(System, sim.Component):
         if isinstance(new_proc_time, Timedelta):
             self._proc_time = new_proc_time
         else:
-            raise TypeError(f"The processing time must be of type >>Timedelta<<, \
-                but it is >>{type(new_proc_time)}<<")
+            raise TypeError(("The processing time must be of type >>Timedelta<<, "
+                             f"but it is >>{type(new_proc_time)}<<"))
     
     @property
     def setup_time(self) -> float:
@@ -3372,14 +3374,14 @@ class InfrastructureObject(System, sim.Component):
         new_setup_time: float,
     ) -> None:
         if self._use_const_setup_time:
-            raise RuntimeError(f"Tried to change setup time of >>{self}<<, but it is \
-                configured to use a constant time of >>{self._setup_time}<<")
+            raise RuntimeError((f"Tried to change setup time of >>{self}<<, but it is "
+                                f"configured to use a constant time of >>{self._setup_time}<<"))
         
         if isinstance(new_setup_time, Timedelta):
             self._setup_time = new_setup_time
         else:
-            raise TypeError(f"The setup time must be of type >>Timedelta<<, \
-                but it is >>{type(new_proc_time)}<<")
+            raise TypeError(("The setup time must be of type >>Timedelta<<, "
+                             f"but it is >>{type(new_proc_time)}<<"))
     
     def add_content(
         self,
@@ -3492,8 +3494,8 @@ class InfrastructureObject(System, sim.Component):
                 dispatcher.update_job_state(job=job, state='BLOCKED')
                 yield self.to_store(store=buffers, item=job, fail_delay=FAIL_DELAY, fail_priority=1)
                 if self.failed():
-                    raise UserWarning(f"Store placement failed after {FAIL_DELAY} time steps. \
-                        There seems to be deadlock.")
+                    raise UserWarning((f"Store placement failed after {FAIL_DELAY} time steps. "
+                                       "There seems to be deadlock."))
                 # [STATE:Buffer] trigger state setting for target buffer
                 buffer = self.to_store_store()
                 if not isinstance(buffer, Buffer):
@@ -3673,7 +3675,7 @@ class ProcessingStation(InfrastructureObject):
             buffer.add_prod_station(prod_station=self)
     
     @property
-    def station_group_id(self) -> ObjectID:
+    def station_group_id(self) -> SystemID:
         return self._station_group_id
     
     @property
@@ -3713,8 +3715,8 @@ class ProcessingStation(InfrastructureObject):
             self._buffers.remove(buffer)
             buffer.remove_prod_station(prod_station=self)
         else:
-            raise KeyError(f"The buffer >>{buffer}<< is not associated with the resource >>{self}<< and \
-                therefore could not be removed.")
+            raise KeyError((f"The buffer >>{buffer}<< is not associated with the resource >>{self}<< and "
+                            "therefore could not be removed."))
     
     ### PROCESS LOGIC
     def pre_process(self) -> None:
@@ -3832,14 +3834,14 @@ class Buffer(sim.Store, InfrastructureObject):
         function to add processing stations which are associated with 
         """
         if not isinstance(prod_station, ProcessingStation):
-            raise TypeError(f"Object is no ProcessingStation type. Only objects of type ProcessingStation can be added to a buffer.")
+            raise TypeError("Object is no ProcessingStation type. Only objects of type ProcessingStation can be added to a buffer.")
         
         # check if adding a new resource exceeds the given capacity
         # each associated processing station needs one storage place in the buffer
         # else deadlocks are possible
         if (self._count_associated_prod_stations + 1) > self.cap:
-            raise UserWarning(f"Tried to add a new resource to buffer {self}, but the number of associated \
-                resources exceeds its capacity which could result in deadlocks.")
+            raise UserWarning((f"Tried to add a new resource to buffer {self}, but the number of associated "
+                               "resources exceeds its capacity which could result in deadlocks."))
         
         # check if processing station can be added
         if prod_station not in self._associated_prod_stations:
@@ -3860,8 +3862,8 @@ class Buffer(sim.Store, InfrastructureObject):
             self._associated_prod_stations.remove(prod_station)
             self._count_associated_prod_stations -= 1
         else:
-            raise KeyError(f"The processing station >>{prod_station}<< is not associated with the resource >>{self}<< and \
-                therefore could not be removed.")
+            raise KeyError((f"The processing station >>{prod_station}<< is not associated with the resource >>{self}<< "
+                            "and therefore could not be removed."))
     
     ### PROCESS LOGIC
     def pre_process(self) -> None:
@@ -3888,9 +3890,7 @@ class Buffer(sim.Store, InfrastructureObject):
                 logger_prodStations.debug(f"[BUFFER: {self}] Neither 'EMPTY' nor 'FULL' at {self.env.now()}")
             
             yield self.passivate()
-        
-        return None
-            
+    
     def post_process(self) -> None:
         pass
     
@@ -3908,8 +3908,8 @@ class Source(InfrastructureObject):
     def __init__(
         self,
         proc_time: Timedelta = Timedelta(hours=2),
-        random_generation: bool = False,
         job_generator: RandomJobGenerator | None = None,
+        job_sequence: Iterator[tuple[SystemID, SystemID, OrderTime]] | None = None,
         num_gen_jobs: int | None = None,
         **kwargs,
     ) -> None:
@@ -3919,12 +3919,14 @@ class Source(InfrastructureObject):
         # assert object information and register object in the environment
         self.res_type = 'Source'
         
-        # random generation
-        if random_generation and job_generator is None:
-            raise ValueError("Random job generator instance needed for random job generation")
+        # generation method
+        if job_generator is None and job_sequence is None:
+            raise ValueError("Random job generator or job sequence necessary for job generation")
+        elif job_generator is not None and job_sequence is not None:
+            raise ValueError("Only one job generation method allowed")
         
-        self.random_generation = random_generation
         self.job_generator = job_generator
+        self.job_sequence = job_sequence
         
         ################## REWORK
         # initialize component with necessary process function
@@ -3974,12 +3976,14 @@ class Source(InfrastructureObject):
         dispatcher = self.env.dispatcher
         
         # use machine custom identifiers for generation
-        machines = infstruct_mgr.res_db.loc[infstruct_mgr.res_db['res_type']=='Machine']
-        machines_custom_ids = machines['custom_id'].to_list()
+        #machines = infstruct_mgr.res_db.loc[infstruct_mgr.res_db['res_type']=='Machine']
+        #machines_custom_ids = machines['custom_id'].to_list()
         
         # use station group custom identifiers for generation
-        station_groups_custom_ids = infstruct_mgr.station_group_db['custom_id'].to_list()
+        #station_groups_custom_ids = infstruct_mgr.station_group_db['custom_id'].to_list()
         
+        # ?? only for random generation?
+        """
         # use production area custom identifiers for generation
         prod_areas = infstruct_mgr.prod_area_db.copy()
         # prod_area_custom_ids = prod_areas.loc[prod_areas['containing_proc_stations'] == True,'custom_id'].to_list()
@@ -3996,8 +4000,11 @@ class Source(InfrastructureObject):
             stat_group_ids[PA_custom_id] = candidates
             
         logger_sources.debug(f"[SOURCE: {self}] Stat Group IDs: {stat_group_ids}")
+        """
         
-        while True:
+        # ** new: job generation by sequence
+        # !! currently only one production area
+        for (prod_area_id, station_group_id, order_times) in self.job_sequence:
             
             if not self.use_stop_time:
                 # use number of generated jobs as stopping criterion
@@ -4018,6 +4025,7 @@ class Source(InfrastructureObject):
             #          machine_order=mat_JobMachID.tolist())
             #mat_ProcTimes, mat_JobMachID = self.job_generator.gen_rnd_job_by_ids(ids=machines_custom_ids)
             #mat_ProcTimes, mat_JobExOrder = self.job_generator.gen_rnd_job_by_ids(ids=station_groups_custom_ids, min_proc_time=5)
+            """
             (job_ex_order, job_target_station_groups, 
              proc_times, setup_times) = self.job_generator.gen_rnd_job_by_ids(
                 exec_system_ids=prod_area_custom_ids,
@@ -4026,9 +4034,12 @@ class Source(InfrastructureObject):
                 gen_setup_times=True,
             )
             logger_sources.debug(f"[SOURCE: {self}] ProcTimes {proc_times} at {self.env.now()}")
+            """
+            
             
             # assign random priority
-            prio = self.job_generator.gen_prio() + count
+            #prio = self.job_generator.gen_prio() + count
+            prio = count
             #prio = [2,8]
             # assign starting and ending dates
             start_date_init = Datetime(2023, 11, 20, hour=6, tzinfo=TIMEZONE_UTC)
@@ -4038,6 +4049,8 @@ class Source(InfrastructureObject):
             
             logger_sources.debug(f"[SOURCE: {self}] {job_ex_order=}")
             logger_sources.debug(f"[SOURCE: {self}] {job_target_station_groups=}")
+            # !! job init with CustomID, but SystemID used
+            # TODO: change intialisation to SystemID
             job = Job(dispatcher=dispatcher,
                       exec_systems_order=job_ex_order,
                       target_stations_order=job_target_station_groups,
@@ -4251,7 +4264,7 @@ class Operation:
         return self._stat_monitor
     
     @property
-    def op_id(self) -> ObjectID:
+    def op_id(self) -> SystemID:
         return self._op_id
     
     @property
@@ -4259,7 +4272,7 @@ class Operation:
         return self._job
     
     @property
-    def job_id(self) -> ObjectID:
+    def job_id(self) -> SystemID:
         return self._job_id
     
     @property
@@ -4300,6 +4313,7 @@ class Operation:
             self._prio = new_prio
             # REWORK changing OP prio must change job prio but only if op is job's current one
 
+# TODO: change system components from CustomID to SystemID (ExecSystem, StationGroup)
 class Job(sim.Component):
     
     def __init__(
@@ -4459,6 +4473,7 @@ class Job(sim.Component):
         # register job instance
         current_state = self._stat_monitor.get_current_state()
         
+        # TODO change to SystemID
         env, self._job_id, name = self._dispatcher.register_job(
                                                     obj=self, custom_identifier=self.custom_identifier,
                                                     name=name, state=current_state)
@@ -4523,7 +4538,7 @@ class Job(sim.Component):
         return self._stat_monitor
     
     @property
-    def job_id(self) -> ObjectID:
+    def job_id(self) -> SystemID:
         return self._job_id
     
     @property
@@ -4616,7 +4631,7 @@ class Job(sim.Component):
     """
     def has_job_id(
         self,
-        job_id: ObjectID,
+        job_id: SystemID,
     ) -> bool:
         
         checks whether the current job has the given id

@@ -125,6 +125,29 @@ class DTManager:
                 ret = datetime.timedelta(microseconds=val)
                 
         return ret
+    
+    def round_td_by_seconds(
+        self,
+        td: Timedelta,
+        round_to_next_seconds: int = 1,
+    ) -> Timedelta:
+        """round timedelta object to the next full defined seconds
+
+        Parameters
+        ----------
+        td : Timedelta
+            timedelta object to be rounded
+        round_to_next_seconds : int, optional
+            number of seconds to round to, by default 1
+
+        Returns
+        -------
+        Timedelta
+            rounded timedelta object
+        """
+        total_seconds = td.total_seconds()
+        rounded_seconds = round(total_seconds / round_to_next_seconds) * round_to_next_seconds
+        return Timedelta(seconds=rounded_seconds)
 
     def current_time_tz(
         self,

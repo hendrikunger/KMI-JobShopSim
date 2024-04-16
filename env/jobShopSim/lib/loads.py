@@ -1,23 +1,76 @@
 from __future__ import annotations
+from typing import TYPE_CHECKING
+from collections.abc import Sequence, Iterable, Iterator
+from dataclasses import dataclass
+from datetime import timedelta as Timedelta
 import numpy as np
 import numpy.typing as npt
 from numpy.random._generator import Generator as NPRandomGenerator
 import random
 from .utils import DTManager
+import sys
+import logging
 
-class RandomJobGenerator:
-    
+if TYPE_CHECKING:
+    from .sim_env import (CustomID, SystemID, SimulationEnvironment, 
+                          ProductionArea, StationGroup, ProcessingStation)
+
+# ** logging
+logging.basicConfig(stream=sys.stdout)
+LOGGING_LEVEL_LOADS = 'DEBUG'
+logger_sequences = logging.getLogger('loads.sequences')
+logger_sequences.setLevel(LOGGING_LEVEL_LOADS)
+
+# order time management
+@dataclass
+class OrderTime:
+    """Dataclass to manage order time components
+    """
+    proc: Timedelta
+    setup: Timedelta
+
+
+class BaseGenerator:
+
     def __init__(
         self,
+        env: SimulationEnvironment,
         seed: int = 42,
     ) -> None:
         """
         seed: seed value for random number generator
         """
+        # simulation environment
+        self._env = env
+        # components for random number generation
         self._np_rnd_gen: NPRandomGenerator = np.random.default_rng(seed=seed)
+        self._seed = seed
+        random.seed(self._seed)
+        # advanced date handling
         self._dt_mgr: DTManager = DTManager()
-        random.seed(seed)
-        
+    
+    def __repr__(self) -> str:
+        return f"{self.__class__.__name__} | Env: {self._env.name()} | Seed: {self._seed}"
+    
+    @property
+    def env(self) -> SimulationEnvironment:
+        return self._env
+    
+    @property
+    def seed(self) -> int:
+        return self._seed
+
+class RandomJobGenerator(BaseGenerator):
+    
+    def __init__(
+        self, 
+        env: SimulationEnvironment, 
+        seed: int = 42,
+        **kwargs,
+    ) -> None:
+        # init base class
+        super().__init__(env=env, seed=seed, **kwargs)
+    
     def gen_rnd_JSSP_inst(
         self,
         n_jobs: int,
@@ -173,3 +226,97 @@ class RandomJobGenerator:
             randomly chosen priority between lowest and highest value
         """
         return int(self._np_rnd_gen.integers(low=lowest, high=highest))
+
+
+# ** sequence generation
+
+class ProductionSequence(BaseGenerator):
+    
+    def __init__(
+        self, 
+        env: SimulationEnvironment, 
+        seed: int = 42,
+        **kwargs,
+    ) -> None:
+        # init base class
+        super().__init__(env=env, seed=seed, **kwargs)
+
+
+class ProductionSequenceSinglePA(ProductionSequence):
+    
+    def __init__(
+        self, 
+        env: SimulationEnvironment,
+        prod_area_id: SystemID,
+        seed: int = 42,
+        **kwargs,
+    ) -> None:
+        super().__init__(env=env, seed=seed, **kwargs)
+        
+        # associated production area
+        self._prod_area_id = prod_area_id
+        self._prod_area: ProductionArea = self.env.infstruct_mgr.lookup_subsystem_info(
+            subsystem_type='ProductionArea',
+            lookup_val=self._prod_area_id,
+            lookup_property='prod_area_id',
+            target_property='prod_area'
+        )
+    
+    def __repr__(self) -> str:
+        return super().__repr__() + f" | ProductionAreaID: {self._prod_area_id}"
+    
+    def constant_sequence(
+        self,
+        order_time_source: Timedelta,
+    ) -> Iterator[tuple[SystemID, SystemID, OrderTime]]:
+        """Generates a constant sequence of job generation infos
+
+        Parameters
+        ----------
+        stat_group_ids : Iterable[SystemID]
+            target station group IDs
+        order_time : Timedelta
+            time for each order
+
+        Yields
+        -------
+        tuple[SystemID, SystemID, Timedelta, Timedelta]
+            prod area ID, target station group ID, processing time, setup time
+        """
+        # request StationGroupIDs by ProdAreaID in StationGroup database
+        stat_group_db = self.env.infstruct_mgr.station_group_db
+        filter_by_prod_area = stat_group_db.loc[stat_group_db['prod_area_id']==self._prod_area_id,:]
+        stat_groups: list[StationGroup]  = filter_by_prod_area['station_group'].tolist()
+        #stat_group_ids = filter_by_prod_area['station_group_id'].tolist()
+        
+        logger_sequences.debug(f"{stat_groups=}")
+        
+        # number of all processing stations in associated production area
+        total_num_proc_stations: int = self._prod_area.num_assoc_proc_station
+        
+        logger_sequences.debug(f"{total_num_proc_stations=}")
+        
+        # order time equally distributed between all station within given ProductionArea
+        # source distributes loads in round robin principle
+        # order time for each station has to be the order time of the source times the number of stations
+        # the source delivers to
+        station_order_time = order_time_source * total_num_proc_stations
+        
+        logger_sequences.debug(f"{station_order_time=}")
+        
+        # generate endless sequence
+        while True:
+            # iterate over all StationGroups
+            for stat_group in stat_groups:
+                # generate job for each ProcessingStation in StationGroup
+                for _ in range(stat_group.num_assoc_proc_station):
+                    # generate random distribution of setup and processing time
+                    setup_time_percentage = self._np_rnd_gen.uniform(low=0.1, high=0.8)
+                    setup_time = setup_time_percentage * station_order_time
+                    # round to next full minute
+                    setup_time = self._dt_mgr.round_td_by_seconds(td=setup_time, round_to_next_seconds=60)
+                    proc_time = station_order_time - setup_time
+                    order_times = OrderTime(proc=proc_time, setup=setup_time)
+                    # StationGroupID
+                    stat_group_id = stat_group.system_id
+                    yield (self._prod_area_id, stat_group_id, order_times)

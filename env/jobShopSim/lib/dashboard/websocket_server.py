@@ -1,8 +1,7 @@
 from quart import websocket, Quart
-from plotly.graph_objs._figure import Figure as PlotlyFigure
 import asyncio
 from asyncio import Queue as AsyncQueue
-from typing import AsyncGenerator
+from collections.abc import AsyncGenerator
 
 # ** network properties
 WS_HOST: str = '127.0.0.1'
@@ -28,6 +27,7 @@ class Broker:
         finally:
             self.connections.remove(connection)
 
+# ** app definition
 app = Quart(__name__)
 broker = Broker()
 

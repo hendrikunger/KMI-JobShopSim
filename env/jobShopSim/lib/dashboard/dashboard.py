@@ -6,19 +6,13 @@ import webbrowser
 import time
 import threading
 import logging
+from .websocket_server import WS_HOST, WS_PORT, WS_ROUTE
 
-
-if __name__ == '__main__':
-    from websocket_server import WS_HOST, WS_PORT, WS_ROUTE
-else:
-    from .websocket_server import WS_HOST, WS_PORT, WS_ROUTE
-
-
+# ** configuration
 HOST: str = '127.0.0.1'
 PORT: int = 8081
 URL: str = f'http://{HOST}:{PORT}'
 WS_URL: str = f'ws://{WS_HOST}:{WS_PORT}/{WS_ROUTE}'
-#WS_URL: str = f'ws://127.0.0.1:5000/random_data'
 
 
 # ** Dash Application
@@ -48,7 +42,6 @@ def update_gantt_chart(
     #print(f"Response from websocket")
     return gantt_chart
 
-
 # ** dashboard management
 def start_webbrowser(
     url: str,
@@ -64,6 +57,7 @@ def start_dashboard() -> None:
     app.run(host=HOST, port=PORT, debug=True, use_reloader=False)
     # closing
     webbrowser_thread.join()
+
 
 if __name__ == '__main__':
     start_dashboard()
