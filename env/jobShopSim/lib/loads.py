@@ -1,5 +1,6 @@
 from __future__ import annotations
 from typing import TYPE_CHECKING
+import typing
 from collections.abc import Sequence, Iterable, Iterator
 from dataclasses import dataclass
 from datetime import timedelta as Timedelta
@@ -255,12 +256,10 @@ class ProductionSequenceSinglePA(ProductionSequence):
         
         # associated production area
         self._prod_area_id = prod_area_id
-        self._prod_area: ProductionArea = self.env.infstruct_mgr.lookup_subsystem_info(
+        self._prod_area = typing.cast('ProductionArea', self.env.infstruct_mgr.lookup_subsystem_info(
             subsystem_type='ProductionArea',
             lookup_val=self._prod_area_id,
-            lookup_property='prod_area_id',
-            target_property='prod_area'
-        )
+        ))
     
     def __repr__(self) -> str:
         return super().__repr__() + f" | ProductionAreaID: {self._prod_area_id}"
@@ -286,7 +285,7 @@ class ProductionSequenceSinglePA(ProductionSequence):
         # request StationGroupIDs by ProdAreaID in StationGroup database
         stat_group_db = self.env.infstruct_mgr.station_group_db
         filter_by_prod_area = stat_group_db.loc[stat_group_db['prod_area_id']==self._prod_area_id,:]
-        stat_groups: list[StationGroup]  = filter_by_prod_area['station_group'].tolist()
+        stat_groups: list['StationGroup']  = filter_by_prod_area['station_group'].tolist()
         #stat_group_ids = filter_by_prod_area['station_group_id'].tolist()
         
         logger_sequences.debug(f"{stat_groups=}")

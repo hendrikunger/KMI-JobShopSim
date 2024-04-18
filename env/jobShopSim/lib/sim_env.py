@@ -2,7 +2,8 @@
 from __future__ import annotations
 import salabim as sim
 from salabim import Queue, State
-from typing import TypeAlias, Self, Any
+from typing import TypeAlias, Self, Any, NewType
+import typing
 from collections import OrderedDict, deque
 from collections.abc import Iterable, Sequence, Generator, Iterator
 from pandas import DataFrame, Series
@@ -38,8 +39,9 @@ sim.yieldless(False)
 
 # type aliases
 SalabimEnv: TypeAlias = sim.Environment
-SystemID: TypeAlias = int
-CustomID: TypeAlias = int | str
+SystemID = NewType('SystemID', int)
+CustomID = NewType('CustomID', str)
+LoadID = NewType('LoadID', int)
 #PlotlyFigure: TypeAlias = Figure
 
 # constants
@@ -312,15 +314,16 @@ class SimulationEnvironment(sim.Environment):
         method which checks for feasibility of agent allocation decisions
         returning True if feasible, False otherwise
         """
-        # check if operation has station group identifier (SGI) (CustomID)
+        # check if operation has station group identifier (SGI) (SystemID)
         op_SGI = op.target_station_group_identifier
         
-        # no station group assigned, choosen station is automatically feasible
+        # no station group assigned, chosen station is automatically feasible
         if op_SGI is None:
             return True
         else:
             # lookup SGIs of the target station's station groups
-            target_SGIs = target_station.supersystems_custom_ids
+            #target_SGIs = target_station.supersystems_custom_ids
+            target_SGIs = target_station.supersystems_ids
             
         if op_SGI in target_SGIs:
             # operation SGI in associated station group IDs found, 
@@ -443,7 +446,7 @@ class InfrastructureManager:
         self._prod_area_db = self._prod_area_db.set_index('prod_area_id')
         self._prod_area_lookup_props: set[str] = set(['prod_area_id', 'custom_id', 'name'])
         # [PRODUCTION AREAS] identifiers
-        self._prod_area_counter: SystemID = 0
+        self._prod_area_counter = SystemID(0)
         self._prod_area_custom_identifiers: set[CustomID] = set()
         
         # [STATION GROUPS] database as simple Pandas DataFrame
@@ -460,7 +463,7 @@ class InfrastructureManager:
         self._station_group_db = self._station_group_db.set_index('station_group_id')
         self._station_group_lookup_props: set[str] = set(['station_group_id', 'custom_id', 'name'])
         # [STATION GROUPS] identifiers
-        self._station_group_counter: SystemID = 0
+        self._station_group_counter = SystemID(0)
         self._station_groups_custom_identifiers: set[CustomID] = set()
         
         # [RESOURCES] database as simple Pandas DataFrame
@@ -478,7 +481,7 @@ class InfrastructureManager:
         self._res_db = self._res_db.set_index('res_id')
         self._res_lookup_props: set[str] = set(['res_id', 'custom_id', 'name'])
         # [RESOURCES] custom identifiers
-        self._res_counter: SystemID = 0
+        self._res_counter = SystemID(0)
         self._res_custom_identifiers: set[CustomID] = set()
         # [RESOURCES] sink: pool of sinks possible to allow multiple sinks in one environment
         # [PERHAPS CHANGED LATER] 
@@ -556,6 +559,7 @@ class InfrastructureManager:
         if subsystem_type not in self._subsystem_types:
             raise ValueError(f"The subsystem type >>{subsystem_type}<< is not allowed. Choose from {self._subsystem_types}")
         
+        system_id: SystemID
         match subsystem_type:
             case 'ProductionArea':
                 system_id = self._prod_area_counter
@@ -738,25 +742,26 @@ class InfrastructureManager:
         if subsystem_type not in self._subsystem_types:
             raise ValueError(f"The subsystem type >>{subsystem_type}<< is not allowed. Choose from {self._subsystem_types}")
         
+        id_prop: str
         match subsystem_type:
             case 'ProductionArea':
                 allowed_lookup_props = self._prod_area_lookup_props
                 lookup_db = self._prod_area_db
                 if target_property is None:
                     target_property = 'prod_area'
-                id_prop: str = 'prod_area_id'
+                id_prop = 'prod_area_id'
             case 'StationGroup':
                 allowed_lookup_props = self._station_group_lookup_props
                 lookup_db = self._station_group_db
                 if target_property is None:
                     target_property = 'station_group'
-                id_prop: str = 'station_group_id'
+                id_prop = 'station_group_id'
             case 'Resource':
                 allowed_lookup_props = self._res_lookup_props
                 lookup_db = self._res_db
                 if target_property is None:
                     target_property = 'resource'
-                id_prop: str = 'res_id'
+                id_prop = 'res_id'
         
         # if no lookup property provided use ID
         if lookup_property is None:
@@ -782,16 +787,16 @@ class InfrastructureManager:
         if lookup_property == id_prop:
             # direct indexing for ID property: always unique, no need for duplicate check
             try:
-                temp1: Any = lookup_db.at[lookup_val, target_property]
-                return temp1
+                idx_res: Any = lookup_db.at[lookup_val, target_property]
+                return idx_res
             except KeyError:
                 raise IndexError((f"There were no subsystems found for the lookup property >>{lookup_property}<< "
                                 f"with the value >>{lookup_val}<<"))
         else:
             try:
-                temp1: Series = lookup_db.loc[lookup_db[lookup_property] == lookup_val, target_property]
+                multi_res = lookup_db.loc[lookup_db[lookup_property] == lookup_val, target_property]
                 # check for empty search result, at least one result necessary
-                if len(temp1) == 0:
+                if len(multi_res) == 0:
                     raise IndexError((f"There were no subsystems found for the lookup property >>{lookup_property}<< "
                                     f"with the value >>{lookup_val}<<"))
             except KeyError:
@@ -800,34 +805,34 @@ class InfrastructureManager:
             # check for multiple entries with same prop-value pair
             ########### PERHAPS CHANGE NECESSARY
             ### multiple entries but only one returned --> prone to errors
-            if len(temp1) > 1:
+            if len(multi_res) > 1:
                 # warn user
                 logger_infstrct.warning(("CAUTION: There are multiple subsystems which share the "
                             f"same value >>{lookup_val}<< for the lookup property >>{lookup_property}<<. "
                             "Only the first entry is returned."))
-        
-            return temp1.iat[0]
+
+            return multi_res.iat[0]
     
     def lookup_custom_ID(
         self,
         subsystem_type: str,
         system_ID: SystemID,
     ) -> CustomID:
-        
+        id_prop: str
         match subsystem_type:
             case 'ProductionArea':
-                id_prop: str = 'prod_area_id'
+                id_prop = 'prod_area_id'
             case 'StationGroup':
-                id_prop: str = 'station_group_id'
+                id_prop = 'station_group_id'
             case 'Resource':
-                id_prop: str = 'res_id'
+                id_prop = 'res_id'
         
-        custom_id = self.lookup_subsystem_info(
+        custom_id = typing.cast(CustomID, self.lookup_subsystem_info(
             subsystem_type=subsystem_type,
             lookup_val=system_ID,
             lookup_property=id_prop,
             target_property='custom_id',
-        )
+        ))
         
         return custom_id
     
@@ -837,11 +842,11 @@ class InfrastructureManager:
         custom_ID: CustomID,
     ) -> SystemID:
         
-        system = self.lookup_subsystem_info(
+        system = typing.cast(System, self.lookup_subsystem_info(
             subsystem_type=subsystem_type,
             lookup_val=custom_ID,
             lookup_property='custom_id',
-        )
+        ))
         
         return system.system_id
     
@@ -939,23 +944,14 @@ class Dispatcher:
             'job_id': int,
             'custom_id': object,
             'job': object,
-            'name': str,
             'job_type': str,
             'prio': object,
-            #'total_proc_time': float,
-            #'creation_date': float,
-            #'release_date': float,
-            #'entry_date': float,
-            #'exit_date': float
-            #'lead_time': float,
             'total_proc_time': object,
             'creation_date': object,
             'release_date': object,
             'planned_starting_date': object,
-            #'entry_date': object,
             'actual_starting_date': object,
             'starting_date_deviation': object,
-            #'exit_date': object,
             'planned_ending_date': object,
             'actual_ending_date': object,
             'ending_date_deviation': object,
@@ -972,11 +968,9 @@ class Dispatcher:
             'prio',
             'creation_date',
             'release_date',
-            #'entry_date',
             'planned_starting_date',
             'actual_starting_date',
             'starting_date_deviation',
-            #'exit_date',
             'planned_ending_date',
             'actual_ending_date',
             'ending_date_deviation',
@@ -991,10 +985,8 @@ class Dispatcher:
         self._op_prop: dict[str, type] = {
             'op_id': int,
             'job_id': int,
-            'job_name': str,
             'custom_id': object,
             'op': object,
-            'name': str,
             'prio': object,
             'execution_system': object,
             'execution_system_custom_id': object,
@@ -1007,11 +999,9 @@ class Dispatcher:
             'order_time': object,
             'creation_date': object,
             'release_date': object,
-            #'entry_date': object,
             'planned_starting_date': object,
             'actual_starting_date': object,
             'starting_date_deviation': object,
-            #'exit_date': object,
             'planned_ending_date': object,
             'actual_ending_date': object,
             'ending_date_deviation': object,
@@ -1051,8 +1041,8 @@ class Dispatcher:
         ####################################
         # managing IDs
         self._id_types = set(['job', 'op'])
-        self._job_id_counter: SystemID = 0
-        self._op_id_counter: SystemID = 0
+        self._job_id_counter = LoadID(0)
+        self._op_id_counter = LoadID(0)
         
         # priority rules
         self._priority_rules: set[str] = set([
@@ -1136,22 +1126,22 @@ class Dispatcher:
     def _obtain_load_obj_id(
         self,
         load_type: str,
-    ) -> SystemID:
+    ) -> LoadID:
         """Simple counter function for managing operation IDs"""
         # assign id and set counter up
-        
         if load_type not in self._id_types:
             raise ValueError(f"Given type {type} not valid. Choose from '{self._id_types}'")
         
+        load_id: LoadID
         match load_type:
             case 'job':
-                ident_no = self._job_id_counter
+                load_id = self._job_id_counter
                 self._job_id_counter += 1
             case 'op':
-                ident_no = self._op_id_counter
+                load_id = self._op_id_counter
                 self._op_id_counter += 1
         
-        return ident_no
+        return load_id
     
     @property
     def cycle_time(self) -> Timedelta:
@@ -1166,21 +1156,16 @@ class Dispatcher:
     ### JOBS ###
     def register_job(
         self,
-        obj: Job,
+        job: Job,
         custom_identifier: CustomID | None,
-        name: str | None,
         state: str,
-    ) -> tuple[SimulationEnvironment, SystemID, str]:
+    ) -> tuple[SimulationEnvironment, LoadID]:
         """
         registers an job object in the dispatcher instance by assigning an unique id and 
         adding the object to the associated jobs
         """
         # obtain id
         job_id = self._obtain_load_obj_id(load_type='job')
-        
-        # custom name
-        if name is None:
-            name = f'J_gen_{job_id}'
         
         # time of creation
         #creation_date = self.env.now()
@@ -1190,34 +1175,31 @@ class Dispatcher:
         new_entry: DataFrame = pd.DataFrame({
                                 'job_id': [job_id],
                                 'custom_id': [custom_identifier],
-                                'job': [obj],
-                                'name': [name],
-                                'job_type': [obj.job_type],
-                                'prio': [obj.prio],
-                                'total_proc_time': [obj.total_proc_time],
+                                'job': [job],
+                                'job_type': [job.job_type],
+                                'prio': [job.prio],
+                                'total_proc_time': [job.total_proc_time],
                                 'creation_date': [creation_date],
-                                'release_date': [obj.time_release],
-                                #'entry_date': [obj.time_entry],
-                                'planned_starting_date': [obj.time_planned_starting],
-                                'actual_starting_date': [obj.time_actual_starting],
-                                'starting_date_deviation': [obj.starting_date_deviation],
-                                #'exit_date': [obj.time_exit],
-                                'planned_ending_date': [obj.time_planned_ending],
-                                'actual_ending_date': [obj.time_actual_ending],
-                                'ending_date_deviation': [obj.ending_date_deviation],
-                                'lead_time': [obj.lead_time],
+                                'release_date': [job.time_release],
+                                'planned_starting_date': [job.time_planned_starting],
+                                'actual_starting_date': [job.time_actual_starting],
+                                'starting_date_deviation': [job.starting_date_deviation],
+                                'planned_ending_date': [job.time_planned_ending],
+                                'actual_ending_date': [job.time_actual_ending],
+                                'ending_date_deviation': [job.ending_date_deviation],
+                                'lead_time': [job.lead_time],
                                 'state': [state]})
         new_entry = new_entry.astype(self._job_prop)
         new_entry = new_entry.set_index('job_id')
         self._job_db = pd.concat([self._job_db, new_entry])
         
-        logger_dispatcher.info(f"Successfully registered job with JobID {job_id} and name {name}")
+        logger_dispatcher.info(f"Successfully registered job with JobID {job_id}")
         
         # write job information directly
-        obj.time_creation = creation_date
+        job.time_creation = creation_date
         
         # return current env, job ID, job name
-        return self._env, job_id, name
+        return self._env, job_id
     
     def update_job_db(
         self,
@@ -1391,13 +1373,12 @@ class Dispatcher:
     ### OPERATIONS ###
     def register_operation(
         self,
-        obj: Operation,
-        exec_system_identifier: CustomID,
-        target_station_group_identifier: CustomID | None,
+        op: Operation,
+        exec_system_identifier: SystemID,
+        target_station_group_identifier: SystemID | None,
         custom_identifier: CustomID | None,
-        name: str | None,
         state: str,
-    ) -> SystemID:
+    ) -> LoadID:
         """
         registers an operation object in the dispatcher instance by assigning an unique id and 
         adding the object to the associated operations
@@ -1413,85 +1394,78 @@ class Dispatcher:
         op_id: assigned operation ID
         name: assigned name
         machine: corresponding machine infrastructure object
+        test 
         """
         # infrastructure manager
         infstruct_mgr = self.env.infstruct_mgr
-        
         # obtain id
         op_id = self._obtain_load_obj_id(load_type='op')
         # time of creation
         #creation_date = self.env.now()
         creation_date = self.env.t_as_dt()
         
-        # custom name
-        if name is None:
-            name = f'O_gen_{op_id}'
-            
         # setup time
-        setup_time: Timedelta = Timedelta()
-        if obj.setup_time is not None:
-            setup_time = obj.setup_time
+        setup_time: Timedelta
+        if op.setup_time is not None:
+            setup_time = op.setup_time
+        else:
+            setup_time = Timedelta()
         
         # corresponding execution system in which the operation is performed
         # no pre-determined assignment of processing stations
-        exec_system = infstruct_mgr.lookup_subsystem_info(
+        exec_system = typing.cast(ProductionArea, infstruct_mgr.lookup_subsystem_info(
                                                     subsystem_type=EXEC_SYSTEM_TYPE,
-                                                    lookup_property='custom_id',
-                                                    lookup_val=exec_system_identifier)
+                                                    lookup_val=exec_system_identifier))
         # if target station group is specified, get instance
-        target_station_group: StationGroup | None = None
+        target_station_group: StationGroup | None
         if target_station_group_identifier is not None:
-            target_station_group = infstruct_mgr.lookup_subsystem_info(
+            target_station_group = typing.cast(StationGroup, infstruct_mgr.lookup_subsystem_info(
                                                     subsystem_type='StationGroup',
-                                                    lookup_property='custom_id',
-                                                    lookup_val= target_station_group_identifier)
+                                                    lookup_val=target_station_group_identifier))
             # validity check: only target stations allowed which are 
             # part of the current execution system
             if target_station_group.system_id not in exec_system:
                 raise ValueError(f"{target_station_group} is not part of {exec_system}. \
                     Mismatch between execution system and associated station groups.")
+        else:
+            target_station_group = None
         
         # new entry for operation data base
         new_entry: DataFrame = pd.DataFrame({
                                 'op_id': [op_id],
-                                'job_id': [obj.job_id],
-                                'job_name': [obj.job.name()],
+                                'job_id': [op.job_id],
                                 'custom_id': [custom_identifier],
-                                'op': [obj],
-                                'name': [name],
-                                'prio': [obj.prio],
+                                'op': [op],
+                                'prio': [op.prio],
                                 'execution_system': [exec_system],
                                 'execution_system_custom_id': [exec_system.custom_identifier],
                                 'execution_system_name': [exec_system.name],
                                 'execution_system_type': [exec_system.subsystem_type],
                                 'target_station_custom_id': [None],
                                 'target_station_name': [None],
-                                'proc_time': [obj.proc_time],
+                                'proc_time': [op.proc_time],
                                 'setup_time': [setup_time],
-                                'order_time': [obj.order_time],
+                                'order_time': [op.order_time],
                                 'creation_date': [creation_date],
-                                'release_date': [obj.time_release],
-                                #'entry_date': [obj.time_entry],
-                                'planned_starting_date': [obj.time_planned_starting],
-                                'actual_starting_date': [obj.time_actual_starting],
-                                'starting_date_deviation': [obj.starting_date_deviation],
-                                #'exit_date': [obj.time_exit],
-                                'planned_ending_date': [obj.time_planned_ending],
-                                'actual_ending_date': [obj.time_actual_ending],
-                                'ending_date_deviation': [obj.ending_date_deviation],
-                                'lead_time': [obj.lead_time],
+                                'release_date': [op.time_release],
+                                'planned_starting_date': [op.time_planned_starting],
+                                'actual_starting_date': [op.time_actual_starting],
+                                'starting_date_deviation': [op.starting_date_deviation],
+                                'planned_ending_date': [op.time_planned_ending],
+                                'actual_ending_date': [op.time_actual_ending],
+                                'ending_date_deviation': [op.ending_date_deviation],
+                                'lead_time': [op.lead_time],
                                 'state': [state]})
         new_entry: DataFrame = new_entry.astype(self._op_prop)
         new_entry = new_entry.set_index('op_id')
         self._op_db = pd.concat([self._op_db, new_entry])
         
-        logger_dispatcher.info(f"Successfully registered operation with OpID {op_id} and name {name}")
+        logger_dispatcher.info(f"Successfully registered operation with OpID {op_id}")
         
         # write operation information directly
-        obj.name = name
-        obj.target_exec_system = exec_system
-        obj.target_station_group = target_station_group
-        obj.time_creation = creation_date
+        op.target_exec_system = exec_system
+        op.target_station_group = target_station_group
+        op.time_creation = creation_date
         
         # return operation ID
         return op_id
@@ -1639,12 +1613,12 @@ class Dispatcher:
         return self._op_db_date_adjusted
 
     #@lru_cache(maxsize=200)
-    def get_job_obj_by_prop(
+    def lookup_job_obj_prop(
         self, 
-        val: SystemID | CustomID | str,
+        val: LoadID | CustomID | str,
         property: str = 'job_id',
         target_prop: str = 'job',
-    ) -> Job:
+    ) -> Any:
         """
         obtain a job object from the dispatcher by its property and corresponding value
         properties: job_id, custom_id, name
@@ -1660,27 +1634,27 @@ class Dispatcher:
         if property == 'job_id':
             # direct indexing for ID property; job_id always unique, no need for duplicate check
             try:
-                temp1: Job = self._job_db.at[val, target_prop]
-                return temp1
+                idx_res: Any = self._job_db.at[val, target_prop]
+                return idx_res
             except KeyError:
                 raise IndexError(f"There were no jobs found for the property '{property}' \
                                 with the value '{val}'")
         else:
-            temp1: Series = self._job_db.loc[self._job_db[property] == val, target_prop]
+            multi_res = self._job_db.loc[self._job_db[property] == val, target_prop]
             # check for empty search result, at least one result necessary
-            if len(temp1) == 0:
+            if len(multi_res) == 0:
                 raise IndexError(f"There were no jobs found for the property '{property}' \
                                 with the value '{val}'")
             # check for multiple entries with same prop-value pair
             ########### PERHAPS CHANGE NECESSARY
             ### multiple entries but only one returned --> prone to errors
-            elif len(temp1) > 1:
+            elif len(multi_res) > 1:
                 # warn user
                 logger_dispatcher.warning(f"CAUTION: There are multiple jobs which share the \
                             same value '{val}' for the property '{property}'. \
                             Only the first entry is returned.")
             
-            return temp1.iat[0]
+            return multi_res.iat[0]
     
     ### ROUTING LOGIC ###
     
@@ -2013,7 +1987,7 @@ class Dispatcher:
         
         # filter operation DB for relevant information
         filter_items: list[str] = [
-            'job_name',
+            'job_id',
             'target_station_custom_id',
             'target_station_name',
             'execution_system',
@@ -2029,7 +2003,7 @@ class Dispatcher:
         ]
         
         hover_data: dict[str, str | bool] = {
-            'job_name': False,
+            'job_id': False,
             'target_station_custom_id': True,
             'execution_system_custom_id': True,
             'prio': True,
@@ -2043,12 +2017,10 @@ class Dispatcher:
         }
         # TODO: disable hover infos if some entries are None
         
-        if self._env.debug_dashboard:
-            self._job_db_date_adjusted = adjust_db_dates_local_tz(db=self._job_db)
-            self._op_db_date_adjusted = adjust_db_dates_local_tz(db=self._op_db)
-        
         #hover_template: str = "proc_time: %{proc_time|%d:%H:%M:%S}"
         if dates_to_local_tz:
+            self._job_db_date_adjusted = adjust_db_dates_local_tz(db=self._job_db)
+            self._op_db_date_adjusted = adjust_db_dates_local_tz(db=self._op_db)
             target_db = self._op_db_date_adjusted
         else:
             target_db = self._op_db
@@ -2074,15 +2046,16 @@ class Dispatcher:
         if sort_by_proc_station:
             sort_key = proc_station_prop
         else:
-            sort_key = 'job_name' 
+            sort_key = 'job_id' 
         
+        df['job_id'] = df['job_id'].astype(str)
         df = df.sort_values(by=sort_key, ascending=sort_ascending, kind='stable')
         
         # group by value
         if group_by_exec_system:
             group_by_key = 'execution_system_custom_id'
         else:
-            group_by_key = 'job_name'
+            group_by_key = 'job_id'
         
         # build Gantt chart with Plotly Timeline
         fig: PlotlyFigure = px.timeline(
@@ -2091,7 +2064,7 @@ class Dispatcher:
             x_end='actual_ending_date',
             y=proc_station_prop, 
             color=group_by_key,
-            hover_name='job_name',
+            hover_name='job_id',
             hover_data=hover_data,
         )
         fig.update_yaxes(type='category', autorange='reversed')
@@ -2113,10 +2086,8 @@ class Dispatcher:
         """
 
         if self._env.debug_dashboard:
-            #fig.show(renderer='browser')
-            # TODO write to websocket
-            fig_json = plotly.io.to_json(fig=fig)
             # send by websocket
+            fig_json = plotly.io.to_json(fig=fig)
             self._env.ws_con.send(fig_json)
         else:
             fig.show()
@@ -2312,7 +2283,7 @@ class System(OrderedDict):
         self._containing_proc_stations = val
     
     @property
-    def supersystems(self) -> OrderedDict[SystemID, System]:
+    def supersystems(self) -> dict[SystemID, System]:
         return self._supersystems
     
     @property
@@ -2498,7 +2469,7 @@ class StationGroup(System):
         """Group of processing stations which are considered parallel machines
         """
         
-        # initiliase base class
+        # initialise base class
         super().__init__(subsystem_type='StationGroup', abstraction_level=1, **kwargs)
         
         return None
@@ -2521,8 +2492,8 @@ class StationGroup(System):
         """
         # type check: only certain subsystems are allowed for each supersystem
         if not isinstance(subsystem, InfrastructureObject):
-            raise TypeError(("The provided subsystem muste be of type >>InfrastructureObject<<, ")
-                             (f"but it is {type(subsystem)}."))
+            raise TypeError(("The provided subsystem muste be of type >>InfrastructureObject<<, "
+                             f"but it is {type(subsystem)}."))
         
         super().add_subsystem(subsystem=subsystem)
 
@@ -3317,7 +3288,7 @@ class InfrastructureObject(System, sim.Component):
         self.logic_queue: Queue = sim.Queue(name=queue_name, env=self.env)
         
         # currently available jobs on that resource
-        self.contents: OrderedDict[SystemID, Job] = OrderedDict()
+        self.contents: OrderedDict[LoadID, Job] = OrderedDict()
         
         # [STATS] additional information
         # number of inputs/outputs
@@ -3674,6 +3645,8 @@ class ProcessingStation(InfrastructureObject):
         for buffer in self._buffers:
             buffer.add_prod_station(prod_station=self)
     
+    # TODO: add station group information or delete
+    """
     @property
     def station_group_id(self) -> SystemID:
         return self._station_group_id
@@ -3681,6 +3654,7 @@ class ProcessingStation(InfrastructureObject):
     @property
     def station_group(self) -> StationGroup:
         return self._station_group
+    """
     
     @property
     def buffers(self) -> set[Buffer]:
@@ -3953,11 +3927,14 @@ class Source(InfrastructureObject):
         function to generate a constant or random processing time
         """
         proc_time = self.env.td_to_simtime(timedelta=self.proc_time)
+        return proc_time
+        """
         if self.random_generation:
             # random generation, add later
             return proc_time
         else:
             return proc_time
+        """
     
     ### PROCESS LOGIC
     def pre_process(self) -> None:
@@ -4047,15 +4024,25 @@ class Source(InfrastructureObject):
             #start_date_init = [Datetime(2023, 11, 20, hour=6), Datetime(2023, 11, 21, hour=2)]
             #end_date_init = [Datetime(2023, 12, 1, hour=10), Datetime(2023, 12, 2, hour=2)]
             
-            logger_sources.debug(f"[SOURCE: {self}] {job_ex_order=}")
-            logger_sources.debug(f"[SOURCE: {self}] {job_target_station_groups=}")
+            #logger_sources.debug(f"[SOURCE: {self}] {job_ex_order=}")
+            #logger_sources.debug(f"[SOURCE: {self}] {job_target_station_groups=}")
             # !! job init with CustomID, but SystemID used
-            # TODO: change intialisation to SystemID
+            # TODO: change initialisation to SystemID
+            """
             job = Job(dispatcher=dispatcher,
                       exec_systems_order=job_ex_order,
                       target_stations_order=job_target_station_groups,
                       proc_times=proc_times,
                       setup_times=setup_times,
+                      prio=prio,
+                      planned_starting_date=start_date_init,
+                      planned_ending_date=end_date_init)
+            """
+            job = Job(dispatcher=dispatcher,
+                      exec_systems_order=[prod_area_id],
+                      target_stations_order=[station_group_id],
+                      proc_times=[order_times.proc],
+                      setup_times=[order_times.setup],
                       prio=prio,
                       planned_starting_date=start_date_init,
                       planned_ending_date=end_date_init)
@@ -4139,15 +4126,14 @@ class Operation:
         self,
         dispatcher: Dispatcher,
         job: Job,
-        exec_system_identifier: CustomID,
+        exec_system_identifier: SystemID,
         proc_time: Timedelta,
         setup_time: Timedelta | None = None,
-        target_station_group_identifier: CustomID | None = None,
+        target_station_group_identifier: SystemID | None = None,
         prio: int | None = None,
         planned_starting_date: Datetime | None = None,
         planned_ending_date: Datetime | None = None,
         custom_identifier: CustomID | None = None,
-        name: str | None = None,
         state: str = 'INIT',
         possible_states: Iterable[str] = (
             'INIT',
@@ -4193,7 +4179,6 @@ class Operation:
             self.order_time = self.proc_time
         # inter-process time characteristics
         # time of release
-        #self.time_release: float = 0.
         self.time_release = DEFAULT_DATETIME
         # time of first operation starting point
         self.time_actual_starting = DEFAULT_DATETIME
@@ -4204,8 +4189,7 @@ class Operation:
         # ending date deviation
         self.ending_date_deviation: Timedelta | None = None
         # lead time
-        #self.lead_time: float = 0.
-        self.lead_time = DEFAULT_DATETIME
+        self.lead_time = Timedelta()
         # starting and end dates
         # validate time zone information for given datetime objects
         if planned_starting_date is not None:
@@ -4229,33 +4213,22 @@ class Operation:
         
         # registration: only return OpID, other properties directly written by dispatcher method
         # add target station group by station group identifier
-        self.name: str | None = None
         self.target_exec_system: System | None = None
         self.target_station_group: StationGroup | None = None
         self.time_creation: Datetime | None = None
         
         self._op_id = self.dispatcher.register_operation(
-                                        obj=self, 
+                                        op=self,
                                         exec_system_identifier=self._exec_system_identifier,
                                         target_station_group_identifier=target_station_group_identifier,
-                                        custom_identifier=custom_identifier, name=name, 
+                                        custom_identifier=custom_identifier,
                                         state=current_state)
-        
-        """
-        (self._op_id, self.name,
-         self.target_exec_system,
-         self.time_creation) = self.dispatcher.register_operation(
-                                                        obj=self, 
-                                                        exec_system_identifier=self._exec_system_identifier,
-                                                        custom_identifier=custom_identifier, name=name, 
-                                                        state=current_state)
-        """
     
     def __repr__(self) -> str:
         return (f'Operation(ProcTime: {self.proc_time}, ExecutionSystemID: {self._exec_system_identifier}, '
                 f'SGI: {self._target_station_group_identifier})')    
     
-    @property   
+    @property
     def dispatcher(self) -> Dispatcher:
         return self._dispatcher
     
@@ -4264,7 +4237,7 @@ class Operation:
         return self._stat_monitor
     
     @property
-    def op_id(self) -> SystemID:
+    def op_id(self) -> LoadID:
         return self._op_id
     
     @property
@@ -4272,15 +4245,15 @@ class Operation:
         return self._job
     
     @property
-    def job_id(self) -> SystemID:
+    def job_id(self) -> LoadID:
         return self._job_id
     
     @property
-    def exec_system_identifier(self) -> CustomID:
+    def exec_system_identifier(self) -> SystemID:
         return self._exec_system_identifier
     
     @property
-    def target_station_group_identifier(self) -> CustomID | None:
+    def target_station_group_identifier(self) -> SystemID | None:
         return self._target_station_group_identifier
     
     @property
@@ -4313,21 +4286,21 @@ class Operation:
             self._prio = new_prio
             # REWORK changing OP prio must change job prio but only if op is job's current one
 
+
 # TODO: change system components from CustomID to SystemID (ExecSystem, StationGroup)
 class Job(sim.Component):
     
     def __init__(
         self,
         dispatcher: Dispatcher,
-        exec_systems_order: Sequence[CustomID],
+        exec_systems_order: Sequence[SystemID],
         proc_times: Sequence[Timedelta],
-        target_stations_order: Sequence[CustomID | None] | None = None,
+        target_stations_order: Sequence[SystemID | None] | None = None,
         setup_times: Sequence[Timedelta | None] | None = None,
-        prio: int | Sequence[int] | None = None,
-        planned_starting_date: Datetime | Sequence[Datetime] | None = None,
-        planned_ending_date: Datetime | Sequence[Datetime] | None = None,
+        prio: int | Sequence[int | None] | None = None,
+        planned_starting_date: Datetime | Sequence[Datetime | None] | None = None,
+        planned_ending_date: Datetime | Sequence[Datetime | None] | None = None,
         custom_identifier: CustomID | None = None,
-        name: str | None = None,
         state: str = 'INIT',
         possible_states: Iterable[str] = (
             'INIT',
@@ -4348,70 +4321,81 @@ class Job(sim.Component):
         # add not provided information
         # target station identifiers
         #if target_stations_order is None:
+        op_target_stations: Sequence[SystemID | None]
         if isinstance(target_stations_order, Sequence):
             op_target_stations = target_stations_order
         else:
-            op_target_stations: list[None] = [None] * len(exec_systems_order)
+            op_target_stations = [None] * len(exec_systems_order)
         # setup times
         if setup_times is None:
-            setup_times: list[None] = [None] * len(proc_times)
+            setup_times = [None] * len(proc_times)
         
         # prio
-        self.op_wise_prio: bool = False
-        self._prio: int | None = None
+        self.op_wise_prio: bool
+        self._prio: int | None
+        op_prios: Sequence[int | None]
         if isinstance(prio, Sequence):
             op_prios = prio
             # job prio later set by 'get_next_operation' method
             self.op_wise_prio = True
+            self._prio = None
         else:
             # job priority applies to all operations
             # priority, default: None --> no prio set
-            op_prios: list[None] = [None] * len(proc_times)
+            op_prios = [None] * len(proc_times)
             # set job priority as a whole
             self._prio = prio
+            self.op_wise_prio = False
         
         # planned dates
-        self.op_wise_starting_date: bool = False
-        self.op_wise_ending_date: bool = False
-        self.time_planned_starting: Datetime | None = None
-        self.time_planned_ending: Datetime | None = None
+        self.op_wise_starting_date: bool
+        self.op_wise_ending_date: bool
+        self.time_planned_starting: Datetime | None
+        self.time_planned_ending: Datetime | None
+        op_starting_dates: Sequence[Datetime | None]
+        op_ending_dates: Sequence[Datetime | None]
         if isinstance(planned_starting_date, Sequence):
             # operation-wise defined starting dates
             # datetime validation done in operation class
             op_starting_dates = planned_starting_date
+            self.time_planned_starting = None
             # job starting date later set by 'get_next_operation' method
             self.op_wise_starting_date = True
         else:
             # only job-wise defined starting date
-            op_starting_dates: list[None] = [None] * len(proc_times)
+            op_starting_dates = [None] * len(proc_times)
             # validate time zone information for given datetime object
             if planned_starting_date is not None:
                 dt_mgr.validate_dt_UTC(planned_starting_date)
             self.time_planned_starting = planned_starting_date
+            self.op_wise_starting_date = False
         if isinstance(planned_ending_date, Sequence):
             # operation-wise defined ending dates
             # datetime validation done in operation class
             op_ending_dates = planned_ending_date
+            self.time_planned_ending = None
             # job ending date later set by 'get_next_operation' method
             self.op_wise_ending_date = True
         else:
             # only job-wise defined starting date
-            op_ending_dates: list[None] = [None] * len(proc_times)
+            op_ending_dates = [None] * len(proc_times)
             # validate time zone information for given datetime object
             if planned_ending_date is not None:
                 dt_mgr.validate_dt_UTC(planned_ending_date)
             self.time_planned_ending = planned_ending_date
+            self.op_wise_ending_date = False
         
         ### VALIDITY CHECK ###
         # length of provided identifiers and lists must match
-        if len(target_stations_order) != len(exec_systems_order):
-            raise ValueError(("The number of target stations must match "
-                "the number of execution systems."))
+        if target_stations_order is not None:
+            if len(target_stations_order) != len(exec_systems_order):
+                raise ValueError(("The number of target stations must match "
+                    "the number of execution systems."))
         if len(proc_times) != len(exec_systems_order):
             raise ValueError(("The number of processing times must match "
                 "the number of execution systems."))
         if len(setup_times) != len(proc_times):
-            raise ValueError((f"The number of setup times must match "
+            raise ValueError(("The number of setup times must match "
                 "the number of processing times."))
         if len(op_prios) != len(proc_times):
             raise ValueError(("The number of operation priorities must match "
@@ -4446,7 +4430,6 @@ class Job(sim.Component):
         
         # inter-process time characteristics
         # time of release
-        #self.time_release: float = 0.
         self.time_release = DEFAULT_DATETIME
         # time of first operation starting point
         self.time_actual_starting = DEFAULT_DATETIME
@@ -4457,10 +4440,8 @@ class Job(sim.Component):
         # ending date deviation
         self.ending_date_deviation: Timedelta | None = None
         # lead time
-        #self.lead_time: float = 0.
-        self.lead_time = DEFAULT_DATETIME
+        self.lead_time = Timedelta()
         # time of creation
-        #self.time_creation: float = 0.
         self.time_creation = DEFAULT_DATETIME
         
         # current resource location
@@ -4473,13 +4454,12 @@ class Job(sim.Component):
         # register job instance
         current_state = self._stat_monitor.get_current_state()
         
-        # TODO change to SystemID
-        env, self._job_id, name = self._dispatcher.register_job(
-                                                    obj=self, custom_identifier=self.custom_identifier,
-                                                    name=name, state=current_state)
+        env, self._job_id = self._dispatcher.register_job(
+                                                    job=self, custom_identifier=self.custom_identifier,
+                                                    state=current_state)
         
-        # intialize base class
-        super().__init__(env=env, name=name, process='', **kwargs)
+        # initialise base class
+        super().__init__(env=env, process='', **kwargs)
         
         ### OPERATIONS ##
         self.operations: deque[Operation] = deque()
@@ -4499,19 +4479,9 @@ class Job(sim.Component):
             self.operations.append(op)
         
         self.open_operations = self.operations.copy()
-        self.total_num_ops: int = len(self.operations)
+        self.total_num_ops = len(self.operations)
         self.num_finished_ops: int = 0
         # current and last OP: properties set by method "get_next_operation"
-        """
-        self._last_op: Operation | None = None
-        self._last_proc_time: Timedelta | None = None
-        self._last_setup_time: Timedelta | None = None
-        self._last_order_time: Timedelta | None = None
-        self._current_op: Operation | None = None
-        self._current_proc_time: Timedelta | None = None
-        self._current_setup_time: Timedelta | None = None
-        self._current_order_time: Timedelta | None = None
-        """
         self.last_op: Operation | None = None
         self.last_proc_time: Timedelta | None = None
         self.last_setup_time: Timedelta | None = None
@@ -4538,11 +4508,11 @@ class Job(sim.Component):
         return self._stat_monitor
     
     @property
-    def job_id(self) -> SystemID:
+    def job_id(self) -> LoadID:
         return self._job_id
     
     @property
-    def prio(self) -> int:
+    def prio(self) -> int | None:
         return self._prio
     
     @prio.setter
@@ -4594,53 +4564,8 @@ class Job(sim.Component):
             raise TypeError(f"From {self}: Object >>{obj}<< muste be of type 'InfrastructureObject'")
         else:
             self._current_resource = obj
-    """
-    def get_next_operation(self) -> Operation | None:
-        
-        get next operation
-        
-        # last operation information
-        self._last_op = self._current_op
-        self._last_proc_time = self._current_proc_time
-        self._last_setup_time = self._current_setup_time
-        self._last_order_time = self._current_order_time
-        # current operation information
-        if self.open_operations:
-            op = self.open_operations.popleft()
-            self._current_proc_time = op.proc_time
-            self._current_setup_time = op.setup_time
-            self._current_order_time = op.order_time
-            # only reset job prio if there are OP-wise defined priorities
-            if self.op_wise_prio:
-                self.prio = op.prio # use setter function to catch possible errors
-                
-            if self.op_wise_starting_date:
-                self.time_planned_starting = op.time_planned_starting
-            if self.op_wise_ending_date:
-                self.time_planned_ending = op.time_planned_ending
-        else:
-            op = None
-            self._current_proc_time = None
-            self._current_setup_time = None
-            self._current_order_time = None
-        
-        self._current_op = op
-        
-        return op
-    """
-    """
-    def has_job_id(
-        self,
-        job_id: SystemID,
-    ) -> bool:
-        
-        checks whether the current job has the given id
-        
-        if self._job_id == job_id:
-            return True
-        else:
-            return False
-    """
+
+
 # !! USE LATER AS COMMON BASIS
 # !! code duplicated with InfrastructureObject
 # ?? possible to make ``BaseComponent`` class

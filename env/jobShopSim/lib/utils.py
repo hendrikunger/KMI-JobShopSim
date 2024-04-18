@@ -295,8 +295,9 @@ def adjust_db_dates_local_tz(
     # obtain date columns from database
     date_cols = get_date_cols_from_db(db=db)
     # adjust UTC times to local time zone provided
-    temp1 = db[date_cols]
-    temp1 = temp1.applymap(dt_mgr.dt_to_timezone, na_action='ignore')
-    db[date_cols] = temp1
+    dates_only = db[date_cols]
+    dates_only = dates_only.applymap(dt_mgr.dt_to_timezone, 
+                                     na_action='ignore', target_tz=tz)
+    db[date_cols] = dates_only
     
     return db.copy()

@@ -106,10 +106,10 @@ class AllocationAgent(Agent):
             self._assoc_system.lowest_level_subsystems(only_processing_stations=True)
             
         # job-related porperties
-        self._current_job: Job | None = None
-        self._last_job: Job | None = None
-        self._current_op: Operation | None = None
-        self._last_op: Operation | None = None
+        self._current_job: 'Job' | None = None
+        self._last_job: 'Job' | None = None
+        self._current_op: 'Operation' | None = None
+        self._last_op: 'Operation' | None = None
         
         # RL related properties
         self.feat_vec: npt.NDArray[np.float32] | None = None
@@ -152,7 +152,7 @@ class AllocationAgent(Agent):
         return self._action
     
     @property
-    def assoc_proc_stations(self) -> tuple[ProcessingStation, ...]:
+    def assoc_proc_stations(self) -> tuple['ProcessingStation', ...]:
         return self._assoc_proc_stations
     
     def update_assoc_proc_stations(self) -> None:
@@ -211,7 +211,7 @@ class AllocationAgent(Agent):
     def _build_feat_vec(
         self,
         job: 'Job',
-    ) -> 'FeatureVector':
+    ) -> npt.NDArray[np.float32]:
         
         # resources
         # needed properties
@@ -230,7 +230,7 @@ class AllocationAgent(Agent):
             # tuple: (System SGI of resource obj, availability status, 
             # WIP calculated in time units)
             temp1: tuple[ObjectID, int, float] = (res_sys_SGI, avail, WIP_time)
-            temp2 = np.array(temp1)
+            temp2 = np.array(temp1, dtype=np.float32)
             
             if i == 0:
                 arr = temp2
@@ -241,7 +241,15 @@ class AllocationAgent(Agent):
         # needed properties
         # order time, target station group ID
         order_time: float = job.current_order_time / Timedelta(hours=1)
-        job_SGI = job.current_op.target_station_group_identifier
+        # current op: obtain StationGroupID
+        current_op = job.current_op
+        if current_op is not None:
+            job_SGI = current_op.target_station_group_identifier
+        else:
+            raise ValueError(("Tried to build feature vector for job without "
+                              "current operation."))
+        # TODO: remove, internal identifiers now all SystemIDs
+        """
         # SGI is type CustomID, but system ID (ObjectID) is needed
         # lookup system ID by custom ID in Infrastructure Manager
         infstruct_mgr = self.env.infstruct_mgr
@@ -249,8 +257,9 @@ class AllocationAgent(Agent):
             subsystem_type='StationGroup',
             custom_ID=job_SGI,
         )
-        temp1: tuple[float, ObjectID] = (system_id, order_time)
-        temp2 = np.array(temp1)
+        """
+        temp1: tuple[float, ObjectID] = (job_SGI, order_time)
+        temp2 = np.array(temp1, dtype=np.float32)
         
         # concat job information
         arr = np.concatenate((arr, temp2))
