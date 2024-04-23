@@ -2,6 +2,7 @@ from __future__ import annotations
 import numpy as np
 import numpy.typing as npt
 from typing import TYPE_CHECKING
+import typing
 from datetime import timedelta as Timedelta
 import logging
 import statistics
@@ -13,9 +14,10 @@ if TYPE_CHECKING:
     from .sim_env import (
         SimulationEnvironment, 
         System,
+        InfStructMonitor,
         ProcessingStation,
         Job, 
-        Operation
+        Operation,
     )
 
 logging.basicConfig(stream=sys.stdout)
@@ -104,12 +106,12 @@ class AllocationAgent(Agent):
         # get associated systems
         self._assoc_proc_stations = \
             self._assoc_system.lowest_level_subsystems(only_processing_stations=True)
-            
-        # job-related porperties
-        self._current_job: 'Job' | None = None
-        self._last_job: 'Job' | None = None
-        self._current_op: 'Operation' | None = None
-        self._last_op: 'Operation' | None = None
+        
+        # job-related properties
+        self._current_job: 'Job | None' = None
+        self._last_job: 'Job | None' = None
+        self._current_op: 'Operation | None' = None
+        self._last_op: 'Operation | None' = None
         
         # RL related properties
         self.feat_vec: npt.NDArray[np.float32] | None = None
@@ -132,19 +134,19 @@ class AllocationAgent(Agent):
         """
         
     @property
-    def current_job(self) -> 'Job':
+    def current_job(self) -> 'Job | None':
         return self._current_job
     
     @property
-    def last_job(self) -> 'Job':
+    def last_job(self) -> 'Job | None':
         return self._last_job
     
     @property
-    def current_op(self) -> 'Operation':
+    def current_op(self) -> 'Operation | None':
         return self._current_op
     
     @property
-    def last_op(self) -> 'Operation':
+    def last_op(self) -> 'Operation | None':
         return self._last_op
     
     @property
@@ -184,7 +186,7 @@ class AllocationAgent(Agent):
             self._current_op = op
         
         # build feature vector
-        self.feat_vec = self._build_feat_vec(job=self._current_job)
+        self.feat_vec = self._build_feat_vec(job=job)
         
         logger_agents.debug(f"[REQUEST Agent {self}]: built FeatVec.")
     
@@ -218,39 +220,42 @@ class AllocationAgent(Agent):
         # station group, availability, WIP_time
         for i, res in enumerate(self._assoc_proc_stations):
             # T1 build feature vector for one machine
-            monitor = res.stat_monitor
+            # !! type of stats monitor not clear
+            monitor = typing.cast(InfStructMonitor, res.stat_monitor)
             # station group identifier should be the system's one 
             # because custom IDs can be non-numeric which is bad for an agent
             # use only first identifier although multiple values are possible
-            res_sys_SGI: ObjectID = list(res.supersystems_ids)[0]
+            res_sys_SGI = list(res.supersystems_ids)[0]
             # availability: boolean to integer
             avail = int(monitor.is_available)
             # WIP_time in hours
-            WIP_time: float = monitor.WIP_load_time / Timedelta(hours=1)
+            WIP_time = monitor.WIP_load_time / Timedelta(hours=1)
             # tuple: (System SGI of resource obj, availability status, 
             # WIP calculated in time units)
-            temp1: tuple[ObjectID, int, float] = (res_sys_SGI, avail, WIP_time)
-            temp2 = np.array(temp1, dtype=np.float32)
+            res_info = (res_sys_SGI, avail, WIP_time)
+            res_info_arr = np.array(res_info, dtype=np.float32)
             
             if i == 0:
-                arr = temp2
+                arr = res_info_arr
             else:
-                arr = np.concatenate((arr, temp2))
+                arr = np.concatenate((arr, res_info_arr))
         
         # job
         # needed properties
-        # order time, target station group ID
-        order_time: float = job.current_order_time / Timedelta(hours=1)
+        # target station group ID, order time
+        assert job.current_order_time is not None
+        order_time = job.current_order_time / Timedelta(hours=1)
         # current op: obtain StationGroupID
         current_op = job.current_op
         if current_op is not None:
             job_SGI = current_op.target_station_group_identifier
+            assert job_SGI is not None
         else:
             raise ValueError(("Tried to build feature vector for job without "
                               "current operation."))
         # TODO: remove, internal identifiers now all SystemIDs
         """
-        # SGI is type CustomID, but system ID (ObjectID) is needed
+        # SGI is type CustomID, but system ID (SystemID) is needed
         # lookup system ID by custom ID in Infrastructure Manager
         infstruct_mgr = self.env.infstruct_mgr
         system_id = infstruct_mgr.lookup_system_ID(
@@ -258,11 +263,11 @@ class AllocationAgent(Agent):
             custom_ID=job_SGI,
         )
         """
-        temp1: tuple[float, ObjectID] = (job_SGI, order_time)
-        temp2 = np.array(temp1, dtype=np.float32)
+        job_info = (job_SGI, order_time)
+        job_info_arr = np.array(job_info, dtype=np.float32)
         
         # concat job information
-        arr = np.concatenate((arr, temp2))
+        arr = np.concatenate((arr, job_info_arr))
         
         return arr
     
@@ -282,7 +287,7 @@ class AllocationAgent(Agent):
             # non-feasible actions
             reward = -100.
         else:
-            # calc reward based on feasible action chosen
+            # calc reward based on feasible action chosen and
             # utilisation, but based on target station group
             # use last OP because current one already set
             op_rew = self._last_op
@@ -291,7 +296,10 @@ class AllocationAgent(Agent):
                 # catch empty OPs
                 raise ValueError(("Tried to calculate reward based "
                                  "on a non-existent operation"))
-            
+            elif op_rew.target_station_group is None:
+                # catch empty OPs
+                raise ValueError(("Tried to calculate reward, but no "
+                                  "target station group is defined"))
             # obtain relevant ProcessingStations contained in 
             # the corresponding StationGroup
             stations = op_rew.target_station_group.assoc_proc_stations
@@ -304,7 +312,6 @@ class AllocationAgent(Agent):
             logger_agents.debug(f"++++++ {util_mean=}")
             
             reward = (util_mean - 1.)
-            
         
         logger_agents.debug(f"+#+#+#+#+# {reward=}")
         

@@ -1,7 +1,7 @@
 from __future__ import annotations
 from typing import TYPE_CHECKING
 import typing
-from collections.abc import Sequence, Iterable, Iterator
+from collections.abc import Sequence, Iterator
 from dataclasses import dataclass
 from datetime import timedelta as Timedelta
 import numpy as np
@@ -14,7 +14,7 @@ import logging
 
 if TYPE_CHECKING:
     from .sim_env import (CustomID, SystemID, SimulationEnvironment, 
-                          ProductionArea, StationGroup, ProcessingStation)
+                          ProductionArea, StationGroup)
 
 # ** logging
 logging.basicConfig(stream=sys.stdout)
@@ -104,9 +104,9 @@ class RandomJobGenerator(BaseGenerator):
         
         # generate operation ID matrix
         # not mandatory because operations are registered in the environment's dispatcher
-        n_ops = n_jobs * n_machines
-        temp2 = np.arange(0, (n_ops), step=1, dtype=np.uint16)
-        mat_OpID = temp2.reshape(n_jobs, -1)
+        #n_ops = n_jobs * n_machines
+        #temp2 = np.arange(0, (n_ops), step=1, dtype=np.uint16)
+        #mat_OpID = temp2.reshape(n_jobs, -1)
         
         return mat_ProcTimes, mat_JobMachID
     
@@ -173,11 +173,12 @@ class RandomJobGenerator(BaseGenerator):
         setup_times: list[Timedelta] = list()
         setup_times_time_unit: list[int] | None = None
         if gen_setup_times:
-            setup_times_time_unit = self._np_rnd_gen.integers(
+            setup_times_time_unit = typing.cast(list[int],
+                                                self._np_rnd_gen.integers(
                                                 min_setup_time, 
                                                 max_setup_time, 
                                                 size=n_objects, 
-                                                dtype=np.uint16).tolist()
+                                                dtype=np.uint16).tolist())
             for time in setup_times_time_unit:
                 # build timedelta object
                 td = self._dt_mgr.timedelta_from_val(val=time,

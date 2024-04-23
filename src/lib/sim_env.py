@@ -2,7 +2,7 @@
 from __future__ import annotations
 import salabim as sim
 from salabim import Queue, State
-from typing import TypeAlias, Self, Any, NewType
+from typing import TypeAlias, Self, Any, NewType, Literal, overload
 import typing
 from collections import OrderedDict, deque
 from collections.abc import Iterable, Sequence, Generator, Iterator
@@ -24,11 +24,11 @@ from plotly.graph_objs._figure import Figure as PlotlyFigure
 import plotly.io
 from websocket import create_connection
 # packages: internal
-from .loads import OrderTime, ProductionSequence
+from .loads import RandomJobGenerator, OrderTime, ProductionSequence
 from .utils import (flatten, DTManager, 
                     TIMEZONE_UTC, TIMEZONE_CEST, 
                     DEFAULT_DATETIME, adjust_db_dates_local_tz)
-from .agents import AllocationAgent, SequencingAgent
+from .agents import Agent, AllocationAgent, SequencingAgent
 from .errors import AssociationError, ViolateStartingCondition
 from .dashboard.dashboard import URL, WS_URL, start_dashboard
 from .dashboard.websocket_server import start_websocket_server
@@ -150,11 +150,11 @@ class SimulationEnvironment(sim.Environment):
         
         # [RESOURCE] infrastructure manager
         self._infstruct_mgr_registered: bool = False
-        self._infstruct_mgr: InfrastructureManager | None = None
+        self._infstruct_mgr: InfrastructureManager
         
         # [LOAD] job dispatcher
         self._dispatcher_registered: bool = False
-        self._dispatcher: Dispatcher | None = None
+        self._dispatcher: Dispatcher
         
         # ?? transient condition (working properly?)
         # transient condition
@@ -282,27 +282,6 @@ class SimulationEnvironment(sim.Environment):
             self._signal_allocation = signal
         
         logger_env.debug(f"Dispatching type >>{signal_type}<<: Flag for Env {self.name()} was set to >>{signal}<<.")
-    
-    # !! REMOVE, added to agents
-    def build_alloc_feat_vec(
-        self,
-        exec_system: System | None = None,
-    ) -> 'FeatureVector':
-        """
-        method to generate allocation feature vectors for a given execution system
-        currently neither conceptualised nor implemented
-        functionality needed:
-            - obtain all relevant subsystems of the execution system
-            - define relevant Infrastructure Object properties which are considered features
-            - build feature vector
-        """
-        ...
-    
-    def build_seq_feat_vec(
-        self,
-        res_obj: InfrastructureObject,
-    ) -> 'FeatureVector':
-        raise NotImplementedError("Building sequencing feature vectors is not supported yet.")
     
     # ?? adding to Dispatcher class?
     def check_feasible_agent_alloc(
@@ -450,7 +429,7 @@ class InfrastructureManager:
         self._prod_area_custom_identifiers: set[CustomID] = set()
         
         # [STATION GROUPS] database as simple Pandas DataFrame
-        self._station_group_prop: dict[str, type] = {
+        self._station_group_prop: dict[str, type | pd.Int64Dtype] = {
             'station_group_id': int,
             'custom_id': object,
             'name': str,
@@ -467,7 +446,7 @@ class InfrastructureManager:
         self._station_groups_custom_identifiers: set[CustomID] = set()
         
         # [RESOURCES] database as simple Pandas DataFrame
-        self._infstruct_prop: dict[str, type] = {
+        self._infstruct_prop: dict[str, type | pd.Int64Dtype] = {
             'res_id': int,
             'custom_id': object,
             'resource': object,
@@ -603,24 +582,15 @@ class InfrastructureManager:
                 custom_identifiers = self._station_groups_custom_identifiers
             case 'Resource':
                 custom_identifiers = self._res_custom_identifiers
-        
-        # check for uniqueness of custom_identifier
-        # type security
-        if not isinstance(custom_identifier, (str, int)):
-            raise TypeError("Custom identifier must be of type STR or INT")
-        # create check value
-        if isinstance(custom_identifier, str):
-            # remove capital letters for checking
-            check_val = custom_identifier.lower()
-        else:
-            check_val = custom_identifier
+            case _:
+                raise ValueError(f"Unknown subsystem type of {subsystem_type}")
         
         # check if value already exists
-        if check_val in custom_identifiers:
+        if custom_identifier in custom_identifiers:
             raise ValueError((f"The custom identifier {custom_identifier} provided for subsystem type {subsystem_type} "
                             "already exists, but has to be unique."))
         else:
-            custom_identifiers.add(check_val)
+            custom_identifiers.add(custom_identifier)
         
         # obtain system ID
         system_id = self._obtain_system_id(subsystem_type=subsystem_type)
@@ -668,7 +638,7 @@ class InfrastructureManager:
                                         'custom_id': [custom_identifier],
                                         'resource': [obj],
                                         'name': [name],
-                                        'res_type': [obj.res_type],
+                                        'res_type': [obj.res_type],  # type: ignore
                                         'state': [state],
                                         'station_group_id': [None]})
                 new_entry = new_entry.astype(self._infstruct_prop)
@@ -859,7 +829,7 @@ class InfrastructureManager:
         return self._res_db
     
     @property
-    def sinks(self) -> set[Sink]:
+    def sinks(self) -> list[Sink]:
         """registered sinks"""
         return self._sinks
     
@@ -1076,8 +1046,6 @@ class Dispatcher:
             
         # [STATS] cycle time
         self._cycle_time: Timedelta = Timedelta()
-        
-        self.np_rnd_gen: NPRandomGenerator = np.random.default_rng(seed=42)
     
     ### DATA MANAGEMENT
     def __repr__(self) -> str:
@@ -1205,7 +1173,7 @@ class Dispatcher:
         self,
         job: Job,
         property: str,
-        val: float | str,
+        val: Any,
     ) -> None:
         """
         updates the information of a job for a given property
@@ -1296,7 +1264,9 @@ class Dispatcher:
         # get current operation of the job instance
         current_op = job.current_op
         # before processing
-        if preprocess:
+        if current_op is None:
+            raise ValueError("Can not update job info because current operation is not available.")
+        elif preprocess:
             # operation enters Processing Station
             #self.release_operation(op=current_op)
             
@@ -1474,7 +1444,7 @@ class Dispatcher:
         self,
         op: Operation,
         property: str,
-        val: float | str,
+        val: Any,
     ) -> None:
         """
         updates the information of a job for a given property
@@ -1661,23 +1631,25 @@ class Dispatcher:
     def check_alloc_dispatch(
         self,
         job: Job,
-    ) -> tuple[bool, AllocationAgent]:
+    ) -> tuple[bool, AllocationAgent | None]:
         # get next operation of job
         next_op = self.get_next_operation(job=job)
         is_agent: bool = False
-        if self._curr_alloc_rule == 'AGENT':
-            # only check agent availability if next operation exists
-            if next_op is not None:
-                target_exec_system = next_op.target_exec_system
-                # check agent availability
-                is_agent = target_exec_system.check_alloc_agent()
-        # if allocation rule is not >>AGENT<< flag is always False
-        
-        # reset feasible flag to False if agent present
         agent: AllocationAgent | None = None
-        if is_agent:
-            agent = target_exec_system.alloc_agent
-            agent.action_feasible = False
+        if self._curr_alloc_rule == 'AGENT' and next_op is not None:
+            if next_op.target_exec_system is None:
+                # should never happen as each operation is registered with 
+                # a system instance
+                raise ValueError("No target execution system assigned.")
+            else:
+                # check agent availability
+                is_agent = next_op.target_exec_system.check_alloc_agent()
+                if is_agent:
+                    agent = next_op.target_exec_system.alloc_agent
+                    agent.action_feasible = False
+                else:
+                    raise ValueError(("Allocation rule set to agent, "
+                                      "but no agent instance found."))
         
         return is_agent, agent
     
@@ -1687,8 +1659,10 @@ class Dispatcher:
     ) -> None:
         # get the target operation of the job
         op = job.current_op
+        assert op is not None
         # execution system of current OP
         target_exec_system = op.target_exec_system
+        assert target_exec_system is not None
         # agent available, get necessary information for decision
         agent = target_exec_system.alloc_agent
         
@@ -1751,8 +1725,10 @@ class Dispatcher:
         if op is not None:
             # get target execution system ((sub)system type) (defined by the global variable EXEC_SYSTEM_TYPE)
             target_exec_system = op.target_exec_system
+            assert target_exec_system is not None
             # get target station group
             target_station_group = op.target_station_group
+            assert target_station_group is not None
             
             logger_dispatcher.debug(f"[DISPATCHER: {self}] Next operation {op}")
             # obtain target station (InfrastructureObject)
@@ -1834,15 +1810,18 @@ class Dispatcher:
                     # [UTILISATION]
                     # choose the station with the lowest utilisation to time
                     target_station: ProcessingStation = min(avail_stations, key=attrgetter('stat_monitor.utilisation'))
-                    logger_dispatcher.debug(f"[DISPATCHER: {self}] Utilisation of {target_station=} is {target_station.stat_monitor.utilisation:.4f}")
+                    logger_dispatcher.debug((f"[DISPATCHER: {self}] Utilisation of "
+                                             f"{target_station=} is {target_station.stat_monitor.utilisation:.4f}"))
                 case 'WIP_LOAD_TIME':
                     # WIP as load/processing time, choose station with lowest WIP
                     target_station: ProcessingStation = min(avail_stations, key=attrgetter('stat_monitor.WIP_load_time'))
-                    logger_dispatcher.debug(f"[DISPATCHER: {self}] WIP LOAD TIME of {target_station=} is {target_station.stat_monitor.WIP_load_time}")
+                    logger_dispatcher.debug((f"[DISPATCHER: {self}] WIP LOAD TIME of "
+                                             f"{target_station=} is {target_station.stat_monitor.WIP_load_time}"))
                 case 'WIP_LOAD_JOBS':
                     # WIP as number of associated jobs, choose station with lowest WIP
                     target_station: ProcessingStation = min(avail_stations, key=attrgetter('stat_monitor.WIP_load_num_jobs'))
-                    logger_dispatcher.debug(f"[DISPATCHER: {self}] WIP LOAD NUM JOBS of {target_station=} is {target_station.stat_monitor.WIP_load_time:.2f}")
+                    logger_dispatcher.debug((f"[DISPATCHER: {self}] WIP LOAD NUM JOBS of "
+                                             f"{target_station=} is {target_station.stat_monitor.WIP_load_time:.2f}"))
             
             # [KPIs] reset all associated processing stations of that group to their original state
             infstruct_mgr.res_objs_temp_state(res_objs=stations, reset_temp=True)
@@ -1861,6 +1840,7 @@ class Dispatcher:
             # request is being made and feature vector obtained
             # get chosen station by tuple index (agent's action)
             station_idx = agent.action
+            assert station_idx is not None
             target_station = avail_stations[station_idx]
             # check feasibility of the chosen target station
             agent.action_feasible = self._env.check_feasible_agent_alloc(
@@ -1878,7 +1858,7 @@ class Dispatcher:
     def request_job_sequencing(
         self,
         req_obj: ProcessingStation,
-    ) -> tuple[Job, float, float]:
+    ) -> tuple[Job, Timedelta, Timedelta | None]:
         """
         request a sequencing decision for a given queue of the requesting resource
         requester: input side processing stations
@@ -1904,6 +1884,8 @@ class Dispatcher:
         job = self.seq_priority_rule(queue=logic_queue)
         # reset environment signal for SEQUENCING
         #self._env.set_dispatching_signal(sequencing=True, reset=True)
+        assert job is not None
+        assert job.current_proc_time is not None
         
         return job, job.current_proc_time, job.current_setup_time
     
@@ -1917,44 +1899,44 @@ class Dispatcher:
             case 'FIFO':
                 # salabim queue pops first entry if no index is specified, 
                 # not last like in Python
-                job = queue.pop()
+                job = typing.cast(Job, queue.pop())
             # last in, last out
             case 'LIFO':
                 # salabim queue pops first entry if no index is specified, 
                 # not last like in Python
-                job = queue.pop(-1)
+                job = typing.cast(Job, queue.pop(-1))
             # shortest processing time
             case 'SPT':
                 # choose job with shortest processing time
                 temp = queue.as_list()
-                job: Job = min(temp, key=attrgetter('current_proc_time'))
+                job = typing.cast(Job, min(temp, key=attrgetter('current_proc_time')))
                 # remove job from original queue
                 queue.remove(job)
             # longest processing time
             case 'LPT':
                 # choose job with longest processing time
                 temp = queue.as_list()
-                job: Job = max(temp, key=attrgetter('current_proc_time'))
+                job = typing.cast(Job, max(temp, key=attrgetter('current_proc_time')))
                 # remove job from original queue
                 queue.remove(job)
             # shortest setup time
             case 'SST':
                 # choose job with shortest setup time
                 temp = queue.as_list()
-                job: Job = min(temp, key=attrgetter('current_setup_time'))
+                job = typing.cast(Job, min(temp, key=attrgetter('current_setup_time')))
                 # remove job from original queue
                 queue.remove(job)
             # longest setup time
             case 'LST':
                 # choose job with longest setup time
                 temp = queue.as_list()
-                job: Job = max(temp, key=attrgetter('current_setup_time'))
+                job = typing.cast(Job, max(temp, key=attrgetter('current_setup_time')))
                 # remove job from original queue
                 queue.remove(job)
             case 'PRIO':
                 # choose job with highest priority
                 temp = queue.as_list()
-                job: Job = max(temp, key=attrgetter('prio'))
+                job = typing.cast(Job, max(temp, key=attrgetter('prio')))
                 # remove job from original queue
                 queue.remove(job)
         
@@ -2365,11 +2347,32 @@ class System(OrderedDict):
         
         logger_infstrct.info(f"Successfully added {subsystem} to {self}.")
     
+    @overload
+    def lowest_level_subsystems(
+        self,
+        only_processing_stations: Literal[False],
+    ) -> tuple[InfrastructureObject, ...]:
+        ...
+    
+    @overload
+    def lowest_level_subsystems(
+        self,
+        only_processing_stations: Literal[True],
+    ) -> tuple[ProcessingStation, ...]:
+        ...
+    
+    @overload
+    def lowest_level_subsystems(
+        self,
+        only_processing_stations: bool,
+    ) -> tuple[InfrastructureObject, ...] | tuple[ProcessingStation, ...]:
+        ...
+    
     #@lru_cache(maxsize=3)
     def lowest_level_subsystems(
         self,
         only_processing_stations: bool = False,
-    ) -> tuple[InfrastructureObject, ...]:
+    ) -> tuple[InfrastructureObject, ...] | tuple[ProcessingStation, ...]:
         """obtain all associated InfrastructureObjects on the lowest hierarchy level
 
         Parameters
@@ -2944,61 +2947,30 @@ class InfStructMonitor(Monitor):
         super().__init__(obj=obj, **kwargs)
         
         # WIP tracking time load
-        """
-        self._WIP_time_db_types = {
-            'sim_time': float,
-            'duration': float,
-            'level': float,
-        }
-        """
         self._WIP_time_db_types = {
             'sim_time': object,
             'duration': object,
             'level': object,
         }
-        ###################### PERHAPS ADD STARTING LEVEL LATER
-        """
-        self._WIP_time_db: DataFrame = pd.DataFrame(
-                                        columns=['sim_time', 'duration', 'level'], 
-                                        data=[[0., 0., 0.]])
-        """
+        # ?? PERHAPS ADD STARTING LEVEL LATER
         self._WIP_time_db: DataFrame = pd.DataFrame(
                                         columns=['sim_time', 'duration', 'level'], 
                                         data=[[self.env.t_as_dt(), Timedelta(), Timedelta()]])
         self._WIP_time_db = self._WIP_time_db.astype(self._WIP_time_db_types)
         
         # WIP tracking number of jobs
-        """
-        self._WIP_num_db_types = {
-            'sim_time': float,
-            'duration': float,
-            'level': int,
-        }
-        """
         self._WIP_num_db_types = {
             'sim_time': object,
             'duration': object,
             'level': int,
         }
-        ###################### PERHAPS ADD STARTING LEVEL LATER
-        """
-        self._WIP_num_db: DataFrame = pd.DataFrame(
-                                        columns=['sim_time', 'duration', 'level'], 
-                                        data=[[0., 0., 0]])
-        """
+        # ?? PERHAPS ADD STARTING LEVEL LATER
         self._WIP_num_db: DataFrame = pd.DataFrame(
                                         columns=['sim_time', 'duration', 'level'], 
                                         data=[[self.env.t_as_dt(), Timedelta(), 0]])
         self._WIP_num_db = self._WIP_num_db.astype(self._WIP_num_db_types)
         
-        #self._current_WIP_time: float = 0.
-        #self._last_WIP_time: float = 0.
-        #self._current_WIP_num: int = 0
-        #self._last_WIP_num: int = 0
-        
-        #self._WIP_time_starting_time: float = self.env.now()
         self._WIP_time_starting_time: Datetime = self.env.t_as_dt()
-        #self._WIP_num_starting_time: float = self.env.now()
         self._WIP_num_starting_time: Datetime = self.env.t_as_dt()
         self._wei_avg_WIP_level_time: Timedelta | None = None
         self._wei_avg_WIP_level_num: float | None = None
@@ -3245,6 +3217,7 @@ class InfrastructureObject(System, sim.Component):
         """
         # [STATS] Monitoring
         # special monitors for some classes
+        self._stat_monitor : Monitor | BufferMonitor | InfStructMonitor
         if isinstance(self, Buffer):
             self._stat_monitor = BufferMonitor(
                                 env=env, obj=self, init_state=state, 
@@ -3253,6 +3226,8 @@ class InfrastructureObject(System, sim.Component):
             self._stat_monitor = InfStructMonitor(
                                 env=env, obj=self, init_state=state, 
                                 possible_states=possible_states, **kwargs)
+        # ?? is this even triggered?
+        # !! check
         else:
             self._stat_monitor = Monitor(env=env, obj=self, init_state=state, 
                                 possible_states=possible_states, **kwargs)
@@ -3263,7 +3238,7 @@ class InfrastructureObject(System, sim.Component):
         # [HIERARCHICAL SYSTEM INFORMATION]
         # contrary to other system types no bucket because a processing station 
         # is the smallest unit in the system view/analysis
-        # initiliase base class >>System<<
+        # initialise base class >>System<<
         # calls to Infrastructure Manager to register object
         System.__init__(
             self,
@@ -3277,6 +3252,7 @@ class InfrastructureObject(System, sim.Component):
         )
         
         self.cap = capacity
+        self.res_type: str
         
         # [SALABIM COMPONENT] initialise base class
         process: str = 'main_logic'
@@ -3307,8 +3283,9 @@ class InfrastructureObject(System, sim.Component):
         else:
             self._use_const_setup_time: bool = False
     
+    # override for corresponding classes
     @property
-    def stat_monitor(self) -> Monitor:
+    def stat_monitor(self) -> Monitor | BufferMonitor | InfStructMonitor:
         return self._stat_monitor
     """
     def td_to_simtime(
@@ -3380,7 +3357,7 @@ class InfrastructureObject(System, sim.Component):
     def put_job(
         self,
         job: Job,
-    ) -> Generator[InfrastructureObject, None, InfrastructureObject]:
+    ) -> Generator[Any, Any, Any]:
         """
         placing
         """
@@ -3425,8 +3402,7 @@ class InfrastructureObject(System, sim.Component):
         else:
             # simply obtain target station if no agent decision is needed
             target_station = dispatcher.request_job_allocation(job=job, is_agent=is_agent)
-                
-                
+        
         # should reset feasibility status, call only once
         # now loop: while not agent.action_feasible
         ### (if action not feasible step again through the decision making process)
@@ -3751,7 +3727,7 @@ class Machine(ProcessingStation):
         # assert object information
         self.res_type = 'Machine'
         
-        # intialize base class
+        # initialise base class
         super().__init__(**kwargs)
 
 class Buffer(sim.Store, InfrastructureObject):
@@ -3779,8 +3755,8 @@ class Buffer(sim.Store, InfrastructureObject):
         self.res_type = 'Buffer'
         self.start_fill_level = fill_level
         
-        # intialize base classes
-        # using hard-coded classes because salabim does not provide 
+        # initialise base classes
+        # using hard-coded classes because Salabim does not provide 
         # interfaces for multiple inheritance
         sim.Store.__init__(self, capacity=capacity, env=kwargs['env'])
         InfrastructureObject.__init__(
@@ -4679,10 +4655,10 @@ class JobGenDurationCondition(ConditionSetter):
         super().__init__(env=env, **kwargs)
         
         # either point in time or duration must be provided
-        if any((sim_run_until, sim_run_duration)) == False:
+        if not any((sim_run_until, sim_run_duration)):
             # both None
             raise ValueError("Either point in time or duration must be provided")
-        elif all((sim_run_until, sim_run_duration)) == True:
+        elif all((sim_run_until, sim_run_duration)):
             # both provided
             raise ValueError("Point in time and duration provided. Only one allowed.")
         

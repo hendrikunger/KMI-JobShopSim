@@ -1,12 +1,13 @@
 from __future__ import annotations
-from typing import TypeAlias, Self, Any
+from typing import Any
+from collections.abc import Generator
 import datetime
 from datetime import datetime as Datetime
 from datetime import timedelta as Timedelta
-from datetime import date as Date
 from datetime import tzinfo as TZInfo
 from datetime import timezone
 from zoneinfo import ZoneInfo
+
 from pandas import DataFrame
 
 # local time-zone, currently static
@@ -297,7 +298,7 @@ def adjust_db_dates_local_tz(
     # adjust UTC times to local time zone provided
     dates_only = db[date_cols]
     dates_only = dates_only.applymap(dt_mgr.dt_to_timezone, 
-                                     na_action='ignore', target_tz=tz)
+                                     na_action='ignore', target_tz=tz) # type: ignore
     db[date_cols] = dates_only
     
     return db.copy()
