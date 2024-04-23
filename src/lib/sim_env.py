@@ -1439,7 +1439,7 @@ class Dispatcher:
                                 'prio': [op.prio],
                                 'execution_system': [exec_system],
                                 'execution_system_custom_id': [exec_system.custom_identifier],
-                                'execution_system_name': [exec_system.name],
+                                'execution_system_name': [exec_system.name()],
                                 'execution_system_type': [exec_system.subsystem_type],
                                 'target_station_custom_id': [None],
                                 'target_station_name': [None],
@@ -2018,6 +2018,7 @@ class Dispatcher:
         # TODO: disable hover infos if some entries are None
         
         #hover_template: str = "proc_time: %{proc_time|%d:%H:%M:%S}"
+        # TODO: use dedicated method to transform dates of job and op databases
         if dates_to_local_tz:
             self._job_db_date_adjusted = adjust_db_dates_local_tz(db=self._job_db)
             self._op_db_date_adjusted = adjust_db_dates_local_tz(db=self._op_db)
@@ -2260,7 +2261,7 @@ class System(OrderedDict):
     def custom_identifier(self) -> CustomID:
         return self._custom_identifier
     
-    # compatibility to salabim component --> declaration as property not allowed
+    # compatibility to Salabim component --> declaration as property not allowed
     def name(self) -> str | None:
         return self._name
     
@@ -2434,7 +2435,7 @@ class ProductionArea(System):
         """Group of processing stations which are considered parallel machines
         """
         
-        # initiliase base class
+        # initialise base class
         super().__init__(subsystem_type='ProductionArea', abstraction_level=2, **kwargs)
     
     def add_subsystem(
